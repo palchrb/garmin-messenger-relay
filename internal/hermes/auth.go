@@ -474,7 +474,7 @@ func (a *HermesAuth) storeCredentials(instanceID string, tokens *AccessAndRefres
 		return
 	}
 
-	if err := os.MkdirAll(filepath.Dir(credsPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(credsPath), 0o700); err != nil {
 		a.logger.Error("Failed to create session directory", "error", err)
 		return
 	}

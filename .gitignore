@@ -1,0 +1,18 @@
+# Binaries
+garmin-messenger-relay
+*.exe
+dist/
+
+# Config & sessions (may contain secrets)
+config.yaml
+sessions/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

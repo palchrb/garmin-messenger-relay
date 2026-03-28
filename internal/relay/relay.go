@@ -279,10 +279,11 @@ func (r *Relay) handleMessage(msg gm.MessageModel) {
 }
 
 // buildSubject constructs the email subject line.
+// Format: [InReach] +47... • 2025-03-28 14:32:15 • image.avif
 func (r *Relay) buildSubject(msg gm.MessageModel) string {
 	from := derefStr(msg.From)
 	if from == "" {
-		from = "unknown"
+		from = "(unknown)"
 	}
 
 	ts := time.Now()
@@ -290,13 +291,18 @@ func (r *Relay) buildSubject(msg gm.MessageModel) string {
 		ts = *msg.SentAt
 	}
 
-	deviceTag := ""
-	if msg.FromDeviceType != nil && *msg.FromDeviceType == gm.DeviceTypeInReach {
-		deviceTag = " [InReach]"
+	subject := fmt.Sprintf("[InReach] %s \u2022 %s", from, ts.Format("2006-01-02 15:04:05"))
+
+	if msg.MediaType != nil {
+		switch *msg.MediaType {
+		case gm.MediaTypeImageAvif:
+			subject += " \u2022 image.avif"
+		case gm.MediaTypeAudioOgg:
+			subject += " \u2022 audio.ogg"
+		}
 	}
 
-	return fmt.Sprintf("Garmin Message from %s%s — %s",
-		from, deviceTag, ts.Format("2006-01-02 15:04 MST"))
+	return subject
 }
 
 // buildEmailBody constructs the plain-text email body from a message.
@@ -304,28 +310,23 @@ func (r *Relay) buildEmailBody(msg gm.MessageModel) string {
 	var sb strings.Builder
 
 	from := derefStr(msg.From)
+	if from == "" {
+		from = "(unknown)"
+	}
+
 	ts := time.Now()
 	if msg.SentAt != nil {
 		ts = *msg.SentAt
 	}
 
-	sb.WriteString("═══════════════════════════════════════\n")
-	sb.WriteString("  GARMIN MESSENGER\n")
-	sb.WriteString("═══════════════════════════════════════\n\n")
+	sb.WriteString(fmt.Sprintf("From: %s\n", from))
 
-	sb.WriteString(fmt.Sprintf("From:    %s\n", from))
-	sb.WriteString(fmt.Sprintf("Time:    %s\n", ts.Format("2006-01-02 15:04:05 MST")))
-
-	if msg.FromDeviceType != nil {
-		sb.WriteString(fmt.Sprintf("Device:  %s\n", *msg.FromDeviceType))
-	}
-
-	sb.WriteString("\n")
-
-	// Text body
-	if body := derefStr(msg.MessageBody); body != "" && r.cfg.Forwarding.ForwardText {
-		sb.WriteString("Message:\n")
-		sb.WriteString("  " + strings.ReplaceAll(body, "\n", "\n  ") + "\n\n")
+	// Caption / text body
+	caption := derefStr(msg.MessageBody)
+	if caption != "" && r.cfg.Forwarding.ForwardText {
+		sb.WriteString(fmt.Sprintf("Caption: %s\n", caption))
+	} else {
+		sb.WriteString("Caption: (empty)\n")
 	}
 
 	// Location
@@ -334,41 +335,29 @@ func (r *Relay) buildEmailBody(msg gm.MessageModel) string {
 		lat := derefFloat64(loc.LatitudeDegrees)
 		lon := derefFloat64(loc.LongitudeDegrees)
 
-		sb.WriteString("Location:\n")
-		sb.WriteString(fmt.Sprintf("  Coordinates: %.6f, %.6f\n", lat, lon))
-		sb.WriteString(fmt.Sprintf("  Maps: https://maps.google.com/?q=%.6f,%.6f\n", lat, lon))
+		if lat != 0 || lon != 0 {
+			sb.WriteString(fmt.Sprintf("Location: %.6f, %.6f\n", lat, lon))
+			sb.WriteString(fmt.Sprintf("Map: https://www.openstreetmap.org/?mlat=%.6f&mlon=%.6f#map=14/%.6f/%.6f&layers=P\n",
+				lat, lon, lat, lon))
+		}
 
 		if alt := derefFloat64(loc.ElevationMeters); alt != 0 {
-			sb.WriteString(fmt.Sprintf("  Elevation:   %.0f m\n", alt))
+			sb.WriteString(fmt.Sprintf("Altitude: %.1f m\n", alt))
 		}
-		if spd := derefFloat64(loc.GroundVelocityMetersPerSecond); spd != 0 {
-			sb.WriteString(fmt.Sprintf("  Speed:       %.1f km/h\n", spd*3.6))
-		}
-		sb.WriteString("\n")
 	}
 
-	// MapShare / LiveTrack links
-	if url := derefStr(msg.MapShareUrl); url != "" {
-		sb.WriteString(fmt.Sprintf("MapShare: %s\n", url))
-		if pw := derefStr(msg.MapSharePassword); pw != "" {
-			sb.WriteString(fmt.Sprintf("Password: %s\n", pw))
+	sb.WriteString(fmt.Sprintf("Sent: %s\n", ts.Format("2006-01-02 15:04:05")))
+	sb.WriteString(fmt.Sprintf("Message ID: %s\n", msg.MessageID))
+
+	// Attachment info
+	if msg.MediaType != nil {
+		switch *msg.MediaType {
+		case gm.MediaTypeImageAvif:
+			sb.WriteString("Attachment: image.avif\n")
+		case gm.MediaTypeAudioOgg:
+			sb.WriteString("Attachment: audio.ogg\n")
 		}
-		sb.WriteString("\n")
 	}
-	if url := derefStr(msg.LiveTrackUrl); url != "" {
-		sb.WriteString(fmt.Sprintf("LiveTrack: %s\n\n", url))
-	}
-
-	// Audio transcription
-	if t := derefStr(msg.Transcription); t != "" {
-		sb.WriteString("Transcription:\n")
-		sb.WriteString("  " + t + "\n\n")
-	}
-
-	sb.WriteString("───────────────────────────────────────\n")
-	sb.WriteString(fmt.Sprintf("Message ID:      %s\n", msg.MessageID))
-	sb.WriteString(fmt.Sprintf("Conversation ID: %s\n", msg.ConversationID))
-	sb.WriteString("Forwarded by garmin-messenger-relay\n")
 
 	return sb.String()
 }
@@ -391,9 +380,8 @@ func (r *Relay) resolveRecipients(caption string) []string {
 	return unique(all)
 }
 
-// downloadMedia fetches the media attachment from Garmin and returns an Attachment.
-// If ffmpeg is available, AVIF images are converted to JPEG and OGG audio to MP3
-// for better email client compatibility. Falls back to the original format otherwise.
+// downloadMedia fetches the media attachment from Garmin and returns an Attachment
+// in its original format (AVIF for images, OGG for audio).
 func (r *Relay) downloadMedia(ctx context.Context, msg gm.MessageModel) (*Attachment, error) {
 	if msg.MediaID == nil || msg.MediaType == nil {
 		return nil, fmt.Errorf("message has no media")
@@ -412,14 +400,6 @@ func (r *Relay) downloadMedia(ctx context.Context, msg gm.MessageModel) (*Attach
 
 	switch *msg.MediaType {
 	case gm.MediaTypeImageAvif:
-		if jpeg, err := transcodeAVIFtoJPEG(ctx, data); err == nil {
-			return &Attachment{
-				Filename:    "image.jpg",
-				ContentType: "image/jpeg",
-				Data:        jpeg,
-			}, nil
-		}
-		// ffmpeg not available — attach as-is
 		return &Attachment{
 			Filename:    "image.avif",
 			ContentType: "image/avif",
@@ -427,14 +407,6 @@ func (r *Relay) downloadMedia(ctx context.Context, msg gm.MessageModel) (*Attach
 		}, nil
 
 	case gm.MediaTypeAudioOgg:
-		if mp3, err := transcodeOGGtoMP3(ctx, data); err == nil {
-			return &Attachment{
-				Filename:    "audio.mp3",
-				ContentType: "audio/mpeg",
-				Data:        mp3,
-			}, nil
-		}
-		// ffmpeg not available — attach as-is
 		return &Attachment{
 			Filename:    "audio.ogg",
 			ContentType: "audio/ogg",
@@ -462,50 +434,6 @@ func (r *Relay) resolveMediaUUID(ctx context.Context, msg gm.MessageModel) (uuid
 	}
 	// Fall back to MessageID as UUID (best-effort).
 	return msg.MessageID, nil
-}
-
-// transcodeAVIFtoJPEG converts AVIF image data to JPEG using ffmpeg.
-// Returns an error if ffmpeg is not available.
-func transcodeAVIFtoJPEG(ctx context.Context, data []byte) ([]byte, error) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return nil, fmt.Errorf("ffmpeg not found")
-	}
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-hide_banner", "-loglevel", "error",
-		"-f", "avif", "-i", "pipe:0",
-		"-f", "mjpeg", "-q:v", "3",
-		"pipe:1",
-	)
-	cmd.Stdin = bytes.NewReader(data)
-	var out, errBuf bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ffmpeg: %w: %s", err, errBuf.String())
-	}
-	return out.Bytes(), nil
-}
-
-// transcodeOGGtoMP3 converts OGG audio data to MP3 using ffmpeg.
-// Returns an error if ffmpeg is not available.
-func transcodeOGGtoMP3(ctx context.Context, data []byte) ([]byte, error) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return nil, fmt.Errorf("ffmpeg not found")
-	}
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-hide_banner", "-loglevel", "error",
-		"-f", "ogg", "-i", "pipe:0",
-		"-f", "mp3", "-b:a", "128k",
-		"pipe:1",
-	)
-	cmd.Stdin = bytes.NewReader(data)
-	var out, errBuf bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ffmpeg: %w: %s", err, errBuf.String())
-	}
-	return out.Bytes(), nil
 }
 
 // transcodeImageToAVIF converts image data (JPEG, PNG, etc.) to AVIF using ffmpeg.
