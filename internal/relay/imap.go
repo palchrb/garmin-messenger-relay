@@ -1,0 +1,331 @@
+package relay
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
+	"github.com/emersion/go-message/mail"
+)
+
+// InboundReply holds the parsed content of an email reply from a recipient.
+type InboundReply struct {
+	// InReplyTo is the Message-ID this email is replying to (from In-Reply-To header).
+	InReplyTo string
+	// From is the reply sender's email address.
+	From string
+	// TextBody is the plain-text reply content with quoted lines stripped.
+	TextBody string
+	// Attachments holds any media files attached to the reply.
+	Attachments []InboundAttachment
+}
+
+// InboundAttachment is a single media attachment from an inbound email reply.
+type InboundAttachment struct {
+	Filename    string
+	ContentType string
+	Data        []byte
+}
+
+// IMAPClient connects to an IMAP server and uses IDLE to receive replies in
+// near-real-time. Discovered replies are sent on the Replies channel.
+type IMAPClient struct {
+	cfg     IMAPConfig
+	log     *slog.Logger
+	Replies chan InboundReply
+
+	mu     sync.Mutex
+	client *imapclient.Client
+	newMsg chan struct{} // notified by UnilateralDataHandler when EXISTS arrives
+}
+
+// NewIMAPClient creates a new IMAPClient. Call Start to begin listening.
+func NewIMAPClient(cfg IMAPConfig, log *slog.Logger) *IMAPClient {
+	return &IMAPClient{
+		cfg:     cfg,
+		log:     log,
+		Replies: make(chan InboundReply, 16),
+		newMsg:  make(chan struct{}, 1),
+	}
+}
+
+// Start connects to the IMAP server and listens for new messages using IDLE.
+// It reconnects automatically on failure. Blocks until ctx is cancelled.
+func (c *IMAPClient) Start(ctx context.Context) {
+	backoff := 5 * time.Second
+	for {
+		if err := c.run(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			c.log.Error("IMAP connection lost, reconnecting", "err", err, "backoff", backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 5*time.Minute {
+				backoff *= 2
+			}
+		} else {
+			return
+		}
+	}
+}
+
+func (c *IMAPClient) run(ctx context.Context) error {
+	addr := fmt.Sprintf("%s:%d", c.cfg.Host, c.cfg.Port)
+
+	// The UnilateralDataHandler fires on server-push events (new messages, expunges).
+	options := &imapclient.Options{
+		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
+			Mailbox: func(data *imapclient.UnilateralDataMailbox) {
+				if data.NumMessages != nil {
+					// Non-blocking send: if the channel is already full we don't need
+					// to queue another notification.
+					select {
+					case c.newMsg <- struct{}{}:
+					default:
+					}
+				}
+			},
+		},
+	}
+
+	client, err := imapclient.DialTLS(addr, options)
+	if err != nil {
+		return fmt.Errorf("IMAP dial: %w", err)
+	}
+	defer client.Close()
+
+	if err := client.Login(c.cfg.Username, c.cfg.Password).Wait(); err != nil {
+		return fmt.Errorf("IMAP login: %w", err)
+	}
+	c.log.Info("IMAP connected", "host", c.cfg.Host)
+
+	if _, err := client.Select("INBOX", nil).Wait(); err != nil {
+		return fmt.Errorf("IMAP SELECT INBOX: %w", err)
+	}
+
+	// Fetch any unseen messages that arrived before we connected.
+	if err := c.fetchUnseen(ctx, client); err != nil {
+		c.log.Warn("initial unseen fetch failed", "err", err)
+	}
+
+	// Start IDLE. The server will call our UnilateralDataHandler callback when
+	// new messages arrive, which notifies c.newMsg.
+	idleCmd, err := client.Idle()
+	if err != nil {
+		return fmt.Errorf("IMAP IDLE: %w", err)
+	}
+
+	// idleCmd.Wait() blocks until IDLE is stopped. Run it in a goroutine.
+	idleDone := make(chan error, 1)
+	go func() { idleDone <- idleCmd.Wait() }()
+
+	// RFC 2177: re-send IDLE at least every 29 minutes.
+	ticker := time.NewTicker(25 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_ = idleCmd.Close()
+			<-idleDone
+			return nil
+
+		case err := <-idleDone:
+			if err != nil {
+				return fmt.Errorf("IMAP IDLE ended: %w", err)
+			}
+			return nil
+
+		case <-ticker.C:
+			// Keepalive: stop and restart IDLE.
+			if err := idleCmd.Close(); err != nil {
+				return fmt.Errorf("IMAP IDLE close: %w", err)
+			}
+			<-idleDone
+			if err := c.fetchUnseen(ctx, client); err != nil {
+				c.log.Warn("keepalive unseen fetch failed", "err", err)
+			}
+			idleCmd, err = client.Idle()
+			if err != nil {
+				return fmt.Errorf("IMAP IDLE restart: %w", err)
+			}
+			idleDone = make(chan error, 1)
+			go func() { idleDone <- idleCmd.Wait() }()
+
+		case <-c.newMsg:
+			// Server pushed EXISTS: new message arrived. Stop IDLE, fetch, restart.
+			if err := idleCmd.Close(); err != nil {
+				return fmt.Errorf("IMAP IDLE close on new msg: %w", err)
+			}
+			<-idleDone
+			if err := c.fetchUnseen(ctx, client); err != nil {
+				c.log.Warn("post-EXISTS unseen fetch failed", "err", err)
+			}
+			idleCmd, err = client.Idle()
+			if err != nil {
+				return fmt.Errorf("IMAP IDLE restart after EXISTS: %w", err)
+			}
+			idleDone = make(chan error, 1)
+			go func() { idleDone <- idleCmd.Wait() }()
+		}
+	}
+}
+
+// fetchUnseen retrieves all UNSEEN messages, parses them, marks them as seen,
+// and dispatches InboundReply values to the Replies channel.
+func (c *IMAPClient) fetchUnseen(ctx context.Context, client *imapclient.Client) error {
+	criteria := &imap.SearchCriteria{NotFlag: []imap.Flag{imap.FlagSeen}}
+	searchData, err := client.Search(criteria, nil).Wait()
+	if err != nil {
+		return fmt.Errorf("IMAP SEARCH UNSEEN: %w", err)
+	}
+	if len(searchData.AllSeqNums()) == 0 {
+		return nil
+	}
+
+	seqSet := imap.SeqSetNum(searchData.AllSeqNums()...)
+	fetchOptions := &imap.FetchOptions{
+		Envelope: true,
+		BodySection: []*imap.FetchItemBodySection{
+			{}, // fetch whole message
+		},
+	}
+	messages := client.Fetch(seqSet, fetchOptions)
+	for {
+		msg := messages.Next()
+		if msg == nil {
+			break
+		}
+		reply, err := c.parseMessage(msg)
+		if err != nil {
+			c.log.Warn("skipping unparseable message", "err", err)
+			continue
+		}
+		if reply == nil {
+			continue
+		}
+		select {
+		case c.Replies <- *reply:
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	if err := messages.Close(); err != nil {
+		return err
+	}
+
+	// Mark fetched messages as seen.
+	storeFlags := &imap.StoreFlags{
+		Op:    imap.StoreFlagsAdd,
+		Flags: []imap.Flag{imap.FlagSeen},
+	}
+	return client.Store(seqSet, storeFlags, nil).Close()
+}
+
+// parseMessage extracts an InboundReply from a fetched IMAP message.
+// Returns nil, nil if the message is not a reply to one of our outgoing emails.
+func (c *IMAPClient) parseMessage(msg *imapclient.FetchMessageData) (*InboundReply, error) {
+	var bodyLiteral imap.LiteralReader
+	for {
+		item := msg.Next()
+		if item == nil {
+			break
+		}
+		if bs, ok := item.(imapclient.FetchItemDataBodySection); ok {
+			bodyLiteral = bs.Literal
+		}
+	}
+	if bodyLiteral == nil {
+		return nil, fmt.Errorf("no body section")
+	}
+
+	mr, err := mail.CreateReader(bodyLiteral)
+	if err != nil {
+		return nil, fmt.Errorf("parsing mail: %w", err)
+	}
+	header := mr.Header
+
+	inReplyTo := strings.TrimSpace(header.Get("In-Reply-To"))
+	if inReplyTo == "" {
+		return nil, nil
+	}
+	// Only process replies to emails we sent (our Message-IDs contain "gmr-").
+	if !strings.Contains(inReplyTo, "gmr-") {
+		return nil, nil
+	}
+
+	from, err := header.AddressList("From")
+	if err != nil || len(from) == 0 {
+		return nil, fmt.Errorf("missing From header")
+	}
+
+	reply := &InboundReply{
+		InReplyTo: inReplyTo,
+		From:      from[0].Address,
+	}
+
+	maxBytes := int64(c.cfg.MaxAttachmentMB) * 1024 * 1024
+	for {
+		p, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+		switch h := p.Header.(type) {
+		case *mail.InlineHeader:
+			ct, _, _ := h.ContentType()
+			if strings.HasPrefix(ct, "text/plain") {
+				body, _ := io.ReadAll(io.LimitReader(p.Body, 64*1024))
+				reply.TextBody = stripQuotedLines(string(body))
+			}
+		case *mail.AttachmentHeader:
+			ct, _, _ := h.ContentType()
+			filename, _ := h.Filename()
+			data, err := io.ReadAll(io.LimitReader(p.Body, maxBytes+1))
+			if err != nil {
+				c.log.Warn("reading attachment failed", "filename", filename, "err", err)
+				continue
+			}
+			if int64(len(data)) > maxBytes {
+				c.log.Warn("attachment too large, skipping",
+					"filename", filename,
+					"size_mb", len(data)/1024/1024,
+					"max_mb", c.cfg.MaxAttachmentMB)
+				continue
+			}
+			reply.Attachments = append(reply.Attachments, InboundAttachment{
+				Filename:    filename,
+				ContentType: ct,
+				Data:        data,
+			})
+		}
+	}
+
+	return reply, nil
+}
+
+// stripQuotedLines removes lines that start with ">" (standard email quoting).
+func stripQuotedLines(body string) string {
+	lines := strings.Split(body, "\n")
+	var kept []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, ">") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
