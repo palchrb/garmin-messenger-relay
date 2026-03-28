@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /workspace/internal/**/*.go)",
+      "Bash(find /workspace -type f -name \"*.go\" ! -path \"*/.git/*\" ! -name \"*_test.go\" ! -name \"*.pb.go\" -exec wc -l {} +)",
+      "Bash(go build:*)",
+      "Bash(git:*)",
+      "Bash(find /workspace -not -path */.git/* -type d)",
+      "Bash(wc -l /workspace/internal/hermes/proto/*.proto)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ]
+  }
+}
