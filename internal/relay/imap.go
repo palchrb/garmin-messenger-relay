@@ -33,7 +33,8 @@ type InboundAttachment struct {
 }
 
 // IMAPClient connects to an IMAP server and uses IDLE to receive replies in
-// near-real-time. Discovered replies are sent on the Replies channel.
+// near-real-time. Falls back to polling if the server does not support IDLE.
+// Discovered replies are sent on the Replies channel.
 type IMAPClient struct {
 	cfg     IMAPConfig
 	log     *slog.Logger
@@ -76,6 +77,8 @@ func (c *IMAPClient) Start(ctx context.Context) {
 	}
 }
 
+const pollInterval = 30 * time.Second
+
 func (c *IMAPClient) run(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", c.cfg.Host, c.cfg.Port)
 
@@ -115,14 +118,21 @@ func (c *IMAPClient) run(ctx context.Context) error {
 		c.log.Warn("initial unseen fetch failed", "err", err)
 	}
 
-	// Start IDLE. The server will call our UnilateralDataHandler callback when
-	// new messages arrive, which notifies c.newMsg.
+	if client.Caps().Has(imap.CapIdle) {
+		c.log.Info("IMAP server supports IDLE, using push notifications")
+		return c.runIdle(ctx, client)
+	}
+	c.log.Info("IMAP server does not support IDLE, falling back to polling", "interval", pollInterval)
+	return c.runPoll(ctx, client)
+}
+
+// runIdle uses IMAP IDLE for real-time push notifications.
+func (c *IMAPClient) runIdle(ctx context.Context, client *imapclient.Client) error {
 	idleCmd, err := client.Idle()
 	if err != nil {
 		return fmt.Errorf("IMAP IDLE: %w", err)
 	}
 
-	// idleCmd.Wait() blocks until IDLE is stopped. Run it in a goroutine.
 	idleDone := make(chan error, 1)
 	go func() { idleDone <- idleCmd.Wait() }()
 
@@ -174,6 +184,23 @@ func (c *IMAPClient) run(ctx context.Context) error {
 			}
 			idleDone = make(chan error, 1)
 			go func() { idleDone <- idleCmd.Wait() }()
+		}
+	}
+}
+
+// runPoll periodically checks for unseen messages when IDLE is not available.
+func (c *IMAPClient) runPoll(ctx context.Context, client *imapclient.Client) error {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := c.fetchUnseen(ctx, client); err != nil {
+				return fmt.Errorf("poll fetch failed: %w", err)
+			}
 		}
 	}
 }

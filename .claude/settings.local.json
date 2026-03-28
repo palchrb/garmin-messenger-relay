@@ -7,7 +7,26 @@
       "Bash(git:*)",
       "Bash(find /workspace -not -path */.git/* -type d)",
       "Bash(wc -l /workspace/internal/hermes/proto/*.proto)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(head:*)",
+      "Bash(apt list:*)",
+      "Bash(curl -sL https://go.dev/dl/go1.24.2.linux-amd64.tar.gz)",
+      "Bash(tar -C /home/claude -xzf -)",
+      "Bash(export PATH=/home/claude/go/bin:$PATH)",
+      "Bash(export GOPATH=/home/claude/gopath)",
+      "Bash(go version:*)",
+      "Bash(rm -rf /home/claude/go)",
+      "Bash(curl -sL https://go.dev/dl/go1.24.2.linux-arm64.tar.gz)",
+      "Bash(go test:*)",
+      "Bash(go install:*)",
+      "Read(//tmp/**)",
+      "Bash(python3 -c \"import zipfile; z=zipfile.ZipFile\\(''protoc.zip''\\); z.extractall\\(''/home/claude/protoc''\\)\")",
+      "Bash(chmod +x /home/claude/protoc/bin/protoc)",
+      "Bash(/home/claude/protoc/bin/protoc --version)",
+      "Bash(export PATH=/home/claude/go/bin:/home/claude/gopath/bin:/home/claude/protoc/bin:$PATH)",
+      "Bash(bash proto/generate.sh)",
+      "Bash(export PATH=/home/claude/go/bin:/home/claude/gopath/bin:$PATH)",
+      "Bash(golangci-lint run:*)"
     ]
   }
 }
