@@ -10,8 +10,8 @@
     "x-amz-algorithm": "AWS4-HMAC-SHA256",
     "x-amz-credential": "AKIATEST/20250115/us-east-1/s3/aws4_request",
     "policy": "eyJleHBpcmF0aW9uIjoiMjAyNS0wMS0xNVQxMjowMDowMFoifQ==",
-    "x-amz-meta-mediaquality": "INTERNET",
-    "Content-Type": "image/avif"
+    "x-amz-meta-media-quality": "INTERNET",
+    "content-type": "image/avif"
   },
   "imageQuality": "INTERNET"
 }

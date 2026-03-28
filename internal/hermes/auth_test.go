@@ -81,7 +81,7 @@ func TestRequestOTP_HappyPath(t *testing.T) {
 		assert.Equal(t, "android", body.Platform)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(NewAppRegistrationResponse{
+		_ = json.NewEncoder(w).Encode(NewAppRegistrationResponse{
 			RequestID:         "req-abc-123",
 			ValidUntil:        ptr("2025-06-01T12:00:00Z"),
 			AttemptsRemaining: ptr(3),
@@ -109,7 +109,7 @@ func TestRequestOTP_409Retry(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(NewAppRegistrationResponse{
+		_ = json.NewEncoder(w).Encode(NewAppRegistrationResponse{
 			RequestID: "req-after-retry",
 		})
 	}))
@@ -147,7 +147,7 @@ func TestConfirmOTP_HappyPath(t *testing.T) {
 		assert.True(t, body.OptInForSms)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(AppRegistrationResponse{
+		_ = json.NewEncoder(w).Encode(AppRegistrationResponse{
 			InstanceID: testInstanceID,
 			AccessAndRefreshToken: AccessAndRefreshToken{
 				AccessToken:  "new-access-token",
@@ -202,7 +202,7 @@ func TestConfirmOTP_CustomPnsHandle(t *testing.T) {
 		assert.True(t, body.OptInForSms)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(AppRegistrationResponse{
+		_ = json.NewEncoder(w).Encode(AppRegistrationResponse{
 			InstanceID: testInstanceID,
 			AccessAndRefreshToken: AccessAndRefreshToken{
 				AccessToken:  "new-access-token",
@@ -304,7 +304,7 @@ func TestResume_ExpiredTriggersRefresh(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/Registration/App/Refresh", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(AppRegistrationResponse{
+		_ = json.NewEncoder(w).Encode(AppRegistrationResponse{
 			InstanceID: testInstanceID,
 			AccessAndRefreshToken: AccessAndRefreshToken{
 				AccessToken:  "refreshed-token",
@@ -344,7 +344,7 @@ func TestHeaders_BearerFormat(t *testing.T) {
 func TestHeaders_TriggersRefresh(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(AppRegistrationResponse{
+		_ = json.NewEncoder(w).Encode(AppRegistrationResponse{
 			InstanceID: testInstanceID,
 			AccessAndRefreshToken: AccessAndRefreshToken{
 				AccessToken:  "refreshed-token",
@@ -378,7 +378,7 @@ func TestRefreshHermesToken_HappyPath(t *testing.T) {
 		assert.Equal(t, testInstanceID, body.InstanceID)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(AppRegistrationResponse{
+		_ = json.NewEncoder(w).Encode(AppRegistrationResponse{
 			InstanceID: testInstanceID,
 			AccessAndRefreshToken: AccessAndRefreshToken{
 				AccessToken:  "new-token",
@@ -418,7 +418,7 @@ func TestRefreshHermesToken_NoCredentials(t *testing.T) {
 func TestAccessTokenFactory_RefreshesExpired(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(AppRegistrationResponse{
+		_ = json.NewEncoder(w).Encode(AppRegistrationResponse{
 			InstanceID: testInstanceID,
 			AccessAndRefreshToken: AccessAndRefreshToken{
 				AccessToken:  "factory-refreshed",

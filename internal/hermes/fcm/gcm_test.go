@@ -34,7 +34,7 @@ func TestGCMCheckin(t *testing.T) {
 		data, err := proto.Marshal(resp)
 		require.NoError(t, err)
 		w.Header().Set("Content-Type", "application/x-protobuf")
-		w.Write(data)
+		_, _ = w.Write(data)
 	}))
 	defer srv.Close()
 
@@ -91,7 +91,7 @@ func TestGCMCheckin_Recheckin(t *testing.T) {
 			SecurityToken: proto.Uint64(222),
 		}
 		data, _ := proto.Marshal(resp)
-		w.Write(data)
+		_, _ = w.Write(data)
 	}))
 	defer srv.Close()
 
@@ -114,7 +114,7 @@ func TestGCMCheckin_Recheckin(t *testing.T) {
 func TestGCMCheckin_Error(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer srv.Close()
 
@@ -190,7 +190,7 @@ func TestGCMRegister_Error(t *testing.T) {
 func TestGCMRegister_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte("unavailable"))
+		_, _ = w.Write([]byte("unavailable"))
 	}))
 	defer srv.Close()
 

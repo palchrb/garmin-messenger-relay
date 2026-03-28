@@ -144,7 +144,7 @@ func TestFCMRegisterAndroidNative(t *testing.T) {
 			SecurityToken: proto.Uint64(888),
 		}
 		out, _ := proto.Marshal(resp)
-		w.Write(out)
+		_, _ = w.Write(out)
 	}))
 	defer checkinServer.Close()
 
