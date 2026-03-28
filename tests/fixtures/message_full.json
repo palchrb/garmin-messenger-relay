@@ -1,0 +1,44 @@
+{
+  "messageId": "11111111-2222-3333-4444-555555555555",
+  "conversationId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "parentMessageId": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+  "messageBody": "Full message with all fields",
+  "to": ["+15559876543"],
+  "from": "+15551234567",
+  "sentAt": "2025-01-15T10:30:00Z",
+  "receivedAt": "2025-01-15T10:30:05Z",
+  "status": [
+    {
+      "userId": "+15551234567",
+      "messageStatus": "Delivered",
+      "updatedAt": "2025-01-15T10:30:10Z"
+    }
+  ],
+  "userLocation": {
+    "latitudeDegrees": 45.5231,
+    "longitudeDegrees": -122.6765,
+    "elevationMeters": 100.0,
+    "groundVelocityMetersPerSecond": 1.5,
+    "courseDegrees": 270.0
+  },
+  "referencePoint": {
+    "latitudeDegrees": 46.0,
+    "longitudeDegrees": -123.0
+  },
+  "messageType": "MapShare",
+  "fromDeviceType": "inReach",
+  "mediaType": "ImageAvif",
+  "mapShareUrl": "https://share.garmin.com/abc123",
+  "mapSharePassword": "secret",
+  "liveTrackUrl": "https://livetrack.garmin.com/xyz",
+  "mediaId": "99999999-8888-7777-6666-555544443333",
+  "mediaMetadata": {
+    "width": 1920,
+    "height": 1080
+  },
+  "uuid": "11111111-2222-3333-4444-555555555555",
+  "transcription": "Voice message transcription text",
+  "otaUuid": "22222222-3333-4444-5555-666677778888",
+  "fromUnitId": "unit-001",
+  "intendedUnitId": "unit-002"
+}

@@ -8,7 +8,7 @@
 syntax = "proto2";
 
 option optimize_for = LITE_RUNTIME;
-option go_package = "github.com/palchrb/garmin-messenger-go/internal/mcspb";
+option go_package = "github.com/palchrb/garmin-messenger-relay/internal/hermes/internal/mcspb";
 
 package gm_mcs_proto;
 

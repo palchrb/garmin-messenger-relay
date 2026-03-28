@@ -7,7 +7,7 @@
 syntax = "proto2";
 
 option optimize_for = LITE_RUNTIME;
-option go_package = "github.com/palchrb/garmin-messenger-go/internal/checkinpb";
+option go_package = "github.com/palchrb/garmin-messenger-relay/internal/hermes/internal/checkinpb";
 
 package gm_checkin_proto;
 

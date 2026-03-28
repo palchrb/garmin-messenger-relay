@@ -1,0 +1,14 @@
+[
+  {
+    "userIdentifier": "308812345678901",
+    "address": "+15551234567",
+    "friendlyName": "Alice",
+    "imageUrl": "https://example.com/alice.jpg"
+  },
+  {
+    "userIdentifier": "308812345678902",
+    "address": "+15559876543",
+    "friendlyName": "Bob",
+    "imageUrl": ""
+  }
+]

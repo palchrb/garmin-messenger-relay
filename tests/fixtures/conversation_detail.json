@@ -1,0 +1,25 @@
+{
+  "metaData": {
+    "conversationId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "memberIds": ["+15551234567", "+15559876543"],
+    "isMuted": false,
+    "isPost": false
+  },
+  "messages": [
+    {
+      "messageId": "11111111-2222-3333-4444-555555555555",
+      "messageBody": "Hello!",
+      "from": "+15551234567",
+      "fromDeviceType": "MessengerApp",
+      "sentAt": "2025-01-15T10:30:00Z"
+    },
+    {
+      "messageId": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      "messageBody": "Hi back!",
+      "from": "+15559876543",
+      "sentAt": "2025-01-15T10:31:00Z"
+    }
+  ],
+  "limit": 50,
+  "lastMessageId": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+}

@@ -1,0 +1,10 @@
+[
+  {
+    "conversationId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "expires": "2025-12-31T23:59:59Z"
+  },
+  {
+    "conversationId": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+    "expires": null
+  }
+]

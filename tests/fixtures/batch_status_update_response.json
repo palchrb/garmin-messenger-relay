@@ -1,0 +1,11 @@
+[
+  {
+    "messageId": "11111111-2222-3333-4444-555555555555",
+    "conversationId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "status": "Read"
+  },
+  {
+    "messageId": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+    "status": "Delivered"
+  }
+]

@@ -16,6 +16,16 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+
+      - name: Install protoc-gen-go
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+
+      - name: Generate protobuf
+        run: cd internal/hermes && bash proto/generate.sh
+
       - name: Run tests
         run: go test ./...
 

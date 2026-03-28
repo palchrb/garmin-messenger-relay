@@ -1,0 +1,12 @@
+{
+  "instanceId": "test-instance-id-12345",
+  "accessAndRefreshToken": {
+    "accessToken": "eyJhbGciOiJFUzI1NiJ9.test.payload",
+    "refreshToken": "refresh-token-test-value",
+    "expiresIn": 3600
+  },
+  "smsOptInResult": {
+    "success": true,
+    "fatalError": false
+  }
+}
