@@ -155,27 +155,33 @@ func (r *Relay) handleReply(ctx context.Context, reply InboundReply) {
 	)
 
 	to := []string{sent.SenderPhone}
+	caption := strings.TrimSpace(reply.TextBody)
 
-	// Send text body if present.
-	if strings.TrimSpace(reply.TextBody) != "" {
-		_, err := r.api.SendMessage(ctx, to, reply.TextBody)
-		if err != nil {
-			r.log.Error("failed to send reply text to Garmin", "err", err)
+	if len(reply.Attachments) > 0 {
+		// Send the first attachment with the reply text as caption.
+		// Subsequent attachments are sent without caption.
+		for i, att := range reply.Attachments {
+			c := ""
+			if i == 0 {
+				c = caption
+			}
+			if err := r.forwardAttachmentToGarmin(ctx, to, att, c); err != nil {
+				r.log.Error("failed to forward attachment to Garmin",
+					"filename", att.Filename, "err", err)
+			}
 		}
-	}
-
-	// Send each attachment (transcode to Garmin-native formats first).
-	for _, att := range reply.Attachments {
-		if err := r.forwardAttachmentToGarmin(ctx, to, att); err != nil {
-			r.log.Error("failed to forward attachment to Garmin",
-				"filename", att.Filename, "err", err)
+	} else if caption != "" {
+		// Text-only reply (no attachments).
+		if _, err := r.api.SendMessage(ctx, to, caption); err != nil {
+			r.log.Error("failed to send reply text to Garmin", "err", err)
 		}
 	}
 }
 
 // forwardAttachmentToGarmin transcodes an inbound email attachment to a
 // Garmin-compatible format and sends it via the Hermes API.
-func (r *Relay) forwardAttachmentToGarmin(ctx context.Context, to []string, att InboundAttachment) error {
+// The caption is included as the message body (visible on Garmin devices).
+func (r *Relay) forwardAttachmentToGarmin(ctx context.Context, to []string, att InboundAttachment, caption string) error {
 	ct := strings.ToLower(att.ContentType)
 	switch {
 	case strings.HasPrefix(ct, "image/"):
@@ -183,7 +189,7 @@ func (r *Relay) forwardAttachmentToGarmin(ctx context.Context, to []string, att 
 		if err != nil {
 			return fmt.Errorf("transcoding image to AVIF: %w", err)
 		}
-		_, err = r.api.SendMediaMessage(ctx, to, "", avif, gm.MediaTypeImageAvif)
+		_, err = r.api.SendMediaMessage(ctx, to, caption, avif, gm.MediaTypeImageAvif)
 		return err
 
 	case strings.HasPrefix(ct, "audio/"):
@@ -197,7 +203,7 @@ func (r *Relay) forwardAttachmentToGarmin(ctx context.Context, to []string, att 
 			ms := int(durationMs)
 			opts = append(opts, gm.WithMediaMetadata(gm.MediaMetadata{DurationMs: &ms}))
 		}
-		_, err = r.api.SendMediaMessage(ctx, to, "", ogg, gm.MediaTypeAudioOgg, opts...)
+		_, err = r.api.SendMediaMessage(ctx, to, caption, ogg, gm.MediaTypeAudioOgg, opts...)
 		return err
 
 	default:
