@@ -241,7 +241,9 @@ func (m *Mailer) buildRaw(msg Message) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	tw.Write([]byte(msg.Body))
+	if _, err := tw.Write([]byte(msg.Body)); err != nil {
+		return nil, err
+	}
 
 	// Attachment parts
 	for _, a := range msg.Attachments {
@@ -256,11 +258,15 @@ func (m *Mailer) buildRaw(msg Message) ([]byte, error) {
 		enc := base64.StdEncoding.EncodeToString(a.Data)
 		// Wrap at 76 chars per RFC 2045
 		for len(enc) > 76 {
-			aw.Write([]byte(enc[:76] + "\r\n"))
+			if _, err := aw.Write([]byte(enc[:76] + "\r\n")); err != nil {
+				return nil, err
+			}
 			enc = enc[76:]
 		}
 		if len(enc) > 0 {
-			aw.Write([]byte(enc + "\r\n"))
+			if _, err := aw.Write([]byte(enc + "\r\n")); err != nil {
+				return nil, err
+			}
 		}
 	}
 

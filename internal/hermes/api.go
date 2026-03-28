@@ -289,21 +289,29 @@ func (api *HermesAPI) UploadMedia(ctx context.Context, signedURL *SignedUploadUr
 	w := multipart.NewWriter(&buf)
 
 	// Add S3 presigned POST fields as form data
-	addField := func(name string, val *string) {
+	addField := func(name string, val *string) error {
 		if val != nil {
-			w.WriteField(name, *val)
+			return w.WriteField(name, *val)
 		}
+		return nil
 	}
-	addField("key", signedURL.Key)
-	addField("x-amz-storage-class", signedURL.XAmzStorageClass)
-	addField("x-amz-date", signedURL.XAmzDate)
-	addField("x-amz-signature", signedURL.XAmzSignature)
-	addField("x-amz-algorithm", signedURL.XAmzAlgorithm)
-	addField("x-amz-credential", signedURL.XAmzCredential)
-	addField("policy", signedURL.Policy)
-	addField("x-amz-meta-media-quality", signedURL.XAmzMetaMediaQuality)
-	if signedURL.ContentType != nil {
-		w.WriteField("Content-Type", *signedURL.ContentType)
+	for _, f := range []struct {
+		name string
+		val  *string
+	}{
+		{"key", signedURL.Key},
+		{"x-amz-storage-class", signedURL.XAmzStorageClass},
+		{"x-amz-date", signedURL.XAmzDate},
+		{"x-amz-signature", signedURL.XAmzSignature},
+		{"x-amz-algorithm", signedURL.XAmzAlgorithm},
+		{"x-amz-credential", signedURL.XAmzCredential},
+		{"policy", signedURL.Policy},
+		{"x-amz-meta-media-quality", signedURL.XAmzMetaMediaQuality},
+		{"Content-Type", signedURL.ContentType},
+	} {
+		if err := addField(f.name, f.val); err != nil {
+			return fmt.Errorf("writing form field %s: %w", f.name, err)
+		}
 	}
 
 	// File part
@@ -318,7 +326,9 @@ func (api *HermesAPI) UploadMedia(ctx context.Context, signedURL *SignedUploadUr
 	if err != nil {
 		return fmt.Errorf("creating multipart file part: %w", err)
 	}
-	part.Write(fileData)
+	if _, err := part.Write(fileData); err != nil {
+		return fmt.Errorf("writing file data: %w", err)
+	}
 	w.Close()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", signedURL.UploadUrl, &buf)

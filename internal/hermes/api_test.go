@@ -37,7 +37,7 @@ func TestGetConversations(t *testing.T) {
 		assert.Equal(t, "20", r.URL.Query().Get("Limit"))
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "get_conversations.json"))
+		_, _ = w.Write(loadFixture(t, "get_conversations.json"))
 	}))
 	defer server.Close()
 
@@ -59,7 +59,7 @@ func TestGetConversationDetail(t *testing.T) {
 		assert.Equal(t, "2.0", r.Header.Get("Api-Version"))
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "conversation_detail.json"))
+		_, _ = w.Write(loadFixture(t, "conversation_detail.json"))
 	}))
 	defer server.Close()
 
@@ -114,7 +114,7 @@ func TestGetConversationMembers(t *testing.T) {
 		assert.Contains(t, r.URL.Path, "/Conversation/Members/")
 		assert.Equal(t, "1.0", r.Header.Get("Api-Version"))
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "conversation_members.json"))
+		_, _ = w.Write(loadFixture(t, "conversation_members.json"))
 	}))
 	defer server.Close()
 
@@ -134,7 +134,7 @@ func TestGetMutedConversations(t *testing.T) {
 		assert.Equal(t, "GET", r.Method)
 		assert.Equal(t, "/Conversation/Muted", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "muted_conversations.json"))
+		_, _ = w.Write(loadFixture(t, "muted_conversations.json"))
 	}))
 	defer server.Close()
 
@@ -167,7 +167,7 @@ func TestSendMessage(t *testing.T) {
 		assert.Nil(t, body["referencePoint"])
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "send_message_response.json"))
+		_, _ = w.Write(loadFixture(t, "send_message_response.json"))
 	}))
 	defer server.Close()
 
@@ -189,7 +189,7 @@ func TestGetMessageDeviceMetadata(t *testing.T) {
 		assert.Equal(t, "2.0", r.Header.Get("Api-Version"))
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "device_metadata.json"))
+		_, _ = w.Write(loadFixture(t, "device_metadata.json"))
 	}))
 	defer server.Close()
 
@@ -259,7 +259,7 @@ func TestMarkAsRead(t *testing.T) {
 		assert.Contains(t, r.URL.Path, "/Status/Read/")
 		assert.Equal(t, "1.0", r.Header.Get("Api-Version"))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(UpdateMessageStatusResponse{
+		_ = json.NewEncoder(w).Encode(UpdateMessageStatusResponse{
 			MessageID:      ptr(uuid.MustParse(testMsgID)),
 			ConversationID: ptr(uuid.MustParse(testConvID)),
 			Status:         ptr(MessageStatusRead),
@@ -278,7 +278,7 @@ func TestMarkAsDelivered(t *testing.T) {
 		assert.Equal(t, "PUT", r.Method)
 		assert.Contains(t, r.URL.Path, "/Status/Delivered/")
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(UpdateMessageStatusResponse{
+		_ = json.NewEncoder(w).Encode(UpdateMessageStatusResponse{
 			MessageID: ptr(uuid.MustParse(testMsgID)),
 			Status:    ptr(MessageStatusDelivered),
 		})
@@ -302,7 +302,7 @@ func TestUpdateMessageStatuses(t *testing.T) {
 		assert.Equal(t, "1.0", r.Header.Get("Api-Version"))
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "batch_status_update_response.json"))
+		_, _ = w.Write(loadFixture(t, "batch_status_update_response.json"))
 	}))
 	defer server.Close()
 
@@ -330,7 +330,7 @@ func TestGetUpdatedStatuses(t *testing.T) {
 		assert.NotEmpty(t, r.URL.Query().Get("Limit"))
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "updated_statuses.json"))
+		_, _ = w.Write(loadFixture(t, "updated_statuses.json"))
 	}))
 	defer server.Close()
 
@@ -351,7 +351,7 @@ func TestGetCapabilities(t *testing.T) {
 		assert.Equal(t, "/UserInfo/Capabilities", r.URL.Path)
 		assert.Equal(t, "1.0", r.Header.Get("Api-Version"))
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"feature1": true}`))
+		_, _ = w.Write([]byte(`{"feature1": true}`))
 	}))
 	defer server.Close()
 
@@ -393,7 +393,7 @@ func TestGetNetworkProperties(t *testing.T) {
 		assert.Equal(t, "/NetworkInfo/Properties", r.URL.Path)
 		assert.Equal(t, "1.0", r.Header.Get("Api-Version"))
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "network_properties.json"))
+		_, _ = w.Write(loadFixture(t, "network_properties.json"))
 	}))
 	defer server.Close()
 
@@ -417,7 +417,7 @@ func TestGetMediaDownloadURL(t *testing.T) {
 		assert.Equal(t, "ImageAvif", r.URL.Query().Get("mediaType"))
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "media_download_url.json"))
+		_, _ = w.Write(loadFixture(t, "media_download_url.json"))
 	}))
 	defer server.Close()
 
@@ -444,7 +444,7 @@ func TestAutoRefreshOnExpiredToken(t *testing.T) {
 		if r.URL.Path == "/Registration/App/Refresh" {
 			refreshCalled = true
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(AppRegistrationResponse{
+			_ = json.NewEncoder(w).Encode(AppRegistrationResponse{
 				InstanceID: testInstanceID,
 				AccessAndRefreshToken: AccessAndRefreshToken{
 					AccessToken:  "refreshed-token",
@@ -457,7 +457,7 @@ func TestAutoRefreshOnExpiredToken(t *testing.T) {
 		// Verify the refreshed token is used
 		assert.Equal(t, "Bearer refreshed-token", r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(loadFixture(t, "network_properties.json"))
+		_, _ = w.Write(loadFixture(t, "network_properties.json"))
 	}))
 	defer server.Close()
 
@@ -478,7 +478,7 @@ func TestAutoRefreshOnExpiredToken(t *testing.T) {
 func TestAPIError_OnFailedRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
-		w.Write([]byte("not found"))
+		_, _ = w.Write([]byte("not found"))
 	}))
 	defer server.Close()
 

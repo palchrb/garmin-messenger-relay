@@ -147,7 +147,7 @@ func TestMCS_LoginResponse(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		mcs.connect(ctx)
+		_ = mcs.connect(ctx)
 	}()
 
 	// Read and discard version + login request from client
@@ -180,7 +180,7 @@ func TestMCS_HeartbeatPingResponse(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		mcs.connect(ctx)
+		_ = mcs.connect(ctx)
 	}()
 
 	discardLoginPacket(t, server)
@@ -230,7 +230,7 @@ func TestMCS_DataMessageStanza(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		mcs.connect(ctx)
+		_ = mcs.connect(ctx)
 	}()
 
 	discardLoginPacket(t, server)
@@ -372,7 +372,7 @@ func TestMCS_HeartbeatTimerSendsping(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		mcs.connect(ctx)
+		_ = mcs.connect(ctx)
 	}()
 
 	discardLoginPacket(t, server)
@@ -459,7 +459,7 @@ func TestMCS_IqStanzaIgnored(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		mcs.connect(ctx)
+		_ = mcs.connect(ctx)
 	}()
 
 	discardLoginPacket(t, server)

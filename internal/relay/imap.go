@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -40,8 +39,6 @@ type IMAPClient struct {
 	log     *slog.Logger
 	Replies chan InboundReply
 
-	mu     sync.Mutex
-	client *imapclient.Client
 	newMsg chan struct{} // notified by UnilateralDataHandler when EXISTS arrives
 }
 
