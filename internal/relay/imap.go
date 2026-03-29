@@ -19,6 +19,8 @@ type InboundReply struct {
 	InReplyTo string
 	// From is the reply sender's email address.
 	From string
+	// FromName is the display name of the reply sender (e.g. "Alice").
+	FromName string
 	// TextBody is the plain-text reply content with quoted lines stripped.
 	TextBody string
 	// Attachments holds any media files attached to the reply.
@@ -296,6 +298,7 @@ func (c *IMAPClient) parseMessage(msg *imapclient.FetchMessageData) (*InboundRep
 	reply := &InboundReply{
 		InReplyTo: inReplyTo,
 		From:      from[0].Address,
+		FromName:  from[0].Name,
 	}
 
 	maxBytes := int64(c.cfg.MaxAttachmentMB) * 1024 * 1024

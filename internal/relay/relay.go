@@ -157,6 +157,17 @@ func (r *Relay) handleReply(ctx context.Context, reply InboundReply) {
 	to := []string{sent.SenderPhone}
 	caption := strings.TrimSpace(reply.TextBody)
 
+	// Prefix with sender name so the inReach user knows who replied.
+	// All replies appear to come from the relay's phone number, so
+	// without this the inReach user cannot tell senders apart.
+	if caption != "" {
+		sender := reply.FromName
+		if sender == "" {
+			sender = reply.From
+		}
+		caption = sender + ": " + caption
+	}
+
 	if len(reply.Attachments) > 0 {
 		// Send the first attachment with the reply text as caption.
 		// Subsequent attachments are sent without caption.
