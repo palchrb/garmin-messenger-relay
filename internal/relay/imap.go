@@ -312,7 +312,7 @@ func (c *IMAPClient) parseMessage(msg *imapclient.FetchMessageData) (*InboundRep
 			ct, _, _ := h.ContentType()
 			if strings.HasPrefix(ct, "text/plain") {
 				body, _ := io.ReadAll(io.LimitReader(p.Body, 64*1024))
-				reply.TextBody = stripQuotedLines(string(body))
+				reply.TextBody = stripQuotedReply(string(body))
 			}
 		case *mail.AttachmentHeader:
 			ct, _, _ := h.ContentType()
@@ -340,16 +340,71 @@ func (c *IMAPClient) parseMessage(msg *imapclient.FetchMessageData) (*InboundRep
 	return reply, nil
 }
 
-// stripQuotedLines removes lines that start with ">" (standard email quoting).
-func stripQuotedLines(body string) string {
+// maxReplyChars is the maximum number of characters to send back to Garmin.
+// inReach devices support up to 1600 characters per message.
+const maxReplyChars = 1600
+
+// stripQuotedReply extracts only the new reply text from an email body,
+// removing quoted original messages, signatures, and email client boilerplate.
+// This is critical because Garmin inReach messages are limited to 1600 characters
+// and sent over satellite.
+func stripQuotedReply(body string) string {
 	lines := strings.Split(body, "\n")
 	var kept []string
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+
+		// Stop at standard ">" quoting
 		if strings.HasPrefix(trimmed, ">") {
-			continue
+			break
 		}
+
+		// Stop at "On <date> <sender> wrote:" (Gmail, Apple Mail)
+		if replyHeader(trimmed) {
+			break
+		}
+
+		// Stop at Outlook separator
+		if strings.HasPrefix(trimmed, "________________________________") {
+			break
+		}
+		if strings.HasPrefix(trimmed, "-----Original Message-----") {
+			break
+		}
+
+		// Stop at Outlook-style header block "From: ... Sent: ..."
+		if strings.HasPrefix(trimmed, "From:") && strings.Contains(body, "Sent:") && strings.Contains(body, "Subject:") {
+			break
+		}
+
+		// Stop at common signature markers
+		if trimmed == "--" || trimmed == "-- " {
+			break
+		}
+
 		kept = append(kept, line)
 	}
-	return strings.TrimSpace(strings.Join(kept, "\n"))
+
+	result := strings.TrimSpace(strings.Join(kept, "\n"))
+
+	// Enforce character limit for satellite transmission
+	if len(result) > maxReplyChars {
+		result = result[:maxReplyChars]
+	}
+
+	return result
+}
+
+// replyHeader detects "On ... wrote:" patterns used by Gmail and Apple Mail.
+func replyHeader(line string) bool {
+	lower := strings.ToLower(line)
+	if strings.HasPrefix(lower, "on ") && strings.HasSuffix(lower, "wrote:") {
+		return true
+	}
+	// Norwegian variant
+	if strings.HasSuffix(lower, "skrev:") && (strings.Contains(lower, " den ") || strings.HasPrefix(lower, "den ")) {
+		return true
+	}
+	return false
 }
