@@ -74,7 +74,9 @@ func (sr *HermesSignalR) OnOpen(handler func())                                 
 func (sr *HermesSignalR) OnClose(handler func())                                     { sr.onClose = handler }
 func (sr *HermesSignalR) OnError(handler func(error))                                { sr.onError = handler }
 
-// Start builds and starts the SignalR connection.
+// Start builds and starts the SignalR connection. It blocks until ctx is
+// cancelled or the connection is permanently lost, ensuring the caller stays
+// alive for the lifetime of the connection.
 func (sr *HermesSignalR) Start(ctx context.Context) error {
 	sr.mu.Lock()
 	sr.stopped = false
@@ -119,6 +121,9 @@ func (sr *HermesSignalR) Start(ctx context.Context) error {
 		sr.onOpen()
 	}
 
+	// Block until the context is cancelled. The SignalR library handles
+	// reconnection internally; we just need to keep the caller alive.
+	<-ctx.Done()
 	return nil
 }
 
