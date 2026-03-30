@@ -142,30 +142,15 @@ docker compose run --rm garmin-relay login
 
 # Start the relay
 docker compose up -d
-```
 
-### Check status
+# Check status
+docker compose run --rm garmin-relay status
 
-```bash
-docker run --rm \
-  -v ./garmin-relay-data:/data \
-  ghcr.io/palchrb/garmin-messenger-relay:latest \
-  status
-```
+# Send a test email
+docker compose run --rm garmin-relay test-smtp
 
-### View logs
-
-```bash
-docker logs -f garmin-relay
-```
-
-### Send a test email
-
-```bash
-docker run --rm \
-  -v ./garmin-relay-data:/data \
-  ghcr.io/palchrb/garmin-messenger-relay:latest \
-  test-smtp
+# View logs
+docker compose logs -f garmin-relay
 ```
 
 ## Configuration
