@@ -313,11 +313,18 @@ The Windows binary works as-is — just download the `.exe` from [Releases](../.
    - Uncheck **Stop the task if it runs longer than**
 7. Click **OK** and enter your Windows password
 
-Before creating the task, authenticate once from a terminal:
+Set up the relay directory and config before creating the task:
 
 ```cmd
+mkdir C:\garmin-relay
 cd C:\garmin-relay
-garmin-messenger-relay.exe login -config config.yaml
+
+:: Download the .exe from GitHub Releases and place it here, then:
+garmin-messenger-relay.exe init
+:: Edit config.yaml with your settings (Notepad, VS Code, etc.)
+
+:: Authenticate (one-time)
+garmin-messenger-relay.exe login
 ```
 
 > **Note:** ffmpeg must be installed and on your PATH for media transcoding.
