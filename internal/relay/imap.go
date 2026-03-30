@@ -42,16 +42,18 @@ type IMAPClient struct {
 	log     *slog.Logger
 	Replies chan InboundReply
 
-	newMsg chan struct{} // notified by UnilateralDataHandler when EXISTS arrives
+	newMsg    chan struct{} // notified by UnilateralDataHandler when EXISTS arrives
+	startedAt time.Time    // only process messages received after this time
 }
 
 // NewIMAPClient creates a new IMAPClient. Call Start to begin listening.
 func NewIMAPClient(cfg IMAPConfig, log *slog.Logger) *IMAPClient {
 	return &IMAPClient{
-		cfg:     cfg,
-		log:     log,
-		Replies: make(chan InboundReply, 16),
-		newMsg:  make(chan struct{}, 1),
+		cfg:       cfg,
+		log:       log,
+		Replies:   make(chan InboundReply, 16),
+		newMsg:    make(chan struct{}, 1),
+		startedAt: time.Now(),
 	}
 }
 
@@ -115,8 +117,8 @@ func (c *IMAPClient) run(ctx context.Context) error {
 		return fmt.Errorf("IMAP SELECT INBOX: %w", err)
 	}
 
-	// Fetch any unseen messages that arrived before we connected.
-	if err := c.fetchUnseen(ctx, client); err != nil {
+	// Fetch unseen messages that arrived since the relay started (skip old mail).
+	if err := c.fetchUnseenSince(ctx, client, c.startedAt); err != nil {
 		c.log.Warn("initial unseen fetch failed", "err", err)
 	}
 
@@ -161,7 +163,7 @@ func (c *IMAPClient) runIdle(ctx context.Context, client *imapclient.Client) err
 				return fmt.Errorf("IMAP IDLE close: %w", err)
 			}
 			<-idleDone
-			if err := c.fetchUnseen(ctx, client); err != nil {
+			if err := c.fetchUnseenSince(ctx, client, c.startedAt); err != nil {
 				c.log.Warn("keepalive unseen fetch failed", "err", err)
 			}
 			idleCmd, err = client.Idle()
@@ -178,7 +180,7 @@ func (c *IMAPClient) runIdle(ctx context.Context, client *imapclient.Client) err
 				return fmt.Errorf("IMAP IDLE close on new msg: %w", err)
 			}
 			<-idleDone
-			if err := c.fetchUnseen(ctx, client); err != nil {
+			if err := c.fetchUnseenSince(ctx, client, c.startedAt); err != nil {
 				c.log.Warn("post-EXISTS unseen fetch failed", "err", err)
 			}
 			idleCmd, err = client.Idle()
@@ -201,17 +203,20 @@ func (c *IMAPClient) runPoll(ctx context.Context, client *imapclient.Client) err
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := c.fetchUnseen(ctx, client); err != nil {
+			if err := c.fetchUnseenSince(ctx, client, c.startedAt); err != nil {
 				return fmt.Errorf("poll fetch failed: %w", err)
 			}
 		}
 	}
 }
 
-// fetchUnseen retrieves all UNSEEN messages, parses them, marks them as seen,
-// and dispatches InboundReply values to the Replies channel.
-func (c *IMAPClient) fetchUnseen(ctx context.Context, client *imapclient.Client) error {
-	criteria := &imap.SearchCriteria{NotFlag: []imap.Flag{imap.FlagSeen}}
+// fetchUnseenSince retrieves UNSEEN messages received on or after the given date,
+// parses them, marks them as seen, and dispatches InboundReply values to the Replies channel.
+func (c *IMAPClient) fetchUnseenSince(ctx context.Context, client *imapclient.Client, since time.Time) error {
+	criteria := &imap.SearchCriteria{
+		NotFlag: []imap.Flag{imap.FlagSeen},
+		Since:   since,
+	}
 	searchData, err := client.Search(criteria, nil).Wait()
 	if err != nil {
 		return fmt.Errorf("IMAP SEARCH UNSEEN: %w", err)
