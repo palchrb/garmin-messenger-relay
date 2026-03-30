@@ -3,6 +3,7 @@ package relay
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -119,6 +120,13 @@ func Load(path string) (*Config, error) {
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config file %s: %w", path, err)
+	}
+
+	// Resolve relative session_dir relative to the config file's directory,
+	// so that "./sessions" always lands next to the config file regardless of CWD.
+	if cfg.Garmin.SessionDir != "" && !filepath.IsAbs(cfg.Garmin.SessionDir) {
+		cfgDir := filepath.Dir(path)
+		cfg.Garmin.SessionDir = filepath.Join(cfgDir, cfg.Garmin.SessionDir)
 	}
 
 	return &cfg, nil
