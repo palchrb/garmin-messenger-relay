@@ -41,6 +41,7 @@ type InboundAttachment struct {
 type IMAPClient struct {
 	cfg     IMAPConfig
 	log     *slog.Logger
+	alerter *Alerter
 	Replies chan InboundReply
 
 	newMsg    chan struct{} // notified by UnilateralDataHandler when EXISTS arrives
@@ -48,10 +49,11 @@ type IMAPClient struct {
 }
 
 // NewIMAPClient creates a new IMAPClient. Call Start to begin listening.
-func NewIMAPClient(cfg IMAPConfig, log *slog.Logger) *IMAPClient {
+func NewIMAPClient(cfg IMAPConfig, log *slog.Logger, alerter *Alerter) *IMAPClient {
 	return &IMAPClient{
 		cfg:       cfg,
 		log:       log,
+		alerter:   alerter,
 		Replies:   make(chan InboundReply, 16),
 		newMsg:    make(chan struct{}, 1),
 		startedAt: time.Now(),
@@ -68,6 +70,13 @@ func (c *IMAPClient) Start(ctx context.Context) {
 				return
 			}
 			c.log.Error("IMAP connection lost, reconnecting", "err", err, "backoff", backoff)
+			if strings.Contains(err.Error(), "AUTHENTICATIONFAILED") || strings.Contains(err.Error(), "login") {
+				c.alerter.Send(AlertIMAPAuthFailure,
+					"IMAP authentication failed",
+					fmt.Sprintf("The relay cannot log in to the IMAP server (%s).\n"+
+						"Error: %v\n\nCheck your imap.username and imap.password in config.yaml.",
+						c.cfg.Host, err))
+			}
 			select {
 			case <-ctx.Done():
 				return

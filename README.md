@@ -194,6 +194,12 @@ forwarding:
 log:
   level: "info"                # Log level: trace, debug, info, warn, error.
   pretty: true                 # Human-readable logs (false for JSON).
+
+# Optional: email alerts for operational issues (Garmin disconnect, IMAP auth
+# failure, session expiry). Leave empty or omit to disable.
+# alerts:
+#   email: "admin@example.com"
+#   cooldown_minutes: 30       # Minimum minutes between repeated alerts.
 ```
 
 ### Gmail setup

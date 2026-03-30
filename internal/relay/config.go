@@ -14,6 +14,7 @@ type Config struct {
 	SMTP       SMTPConfig       `yaml:"smtp"`
 	IMAP       IMAPConfig       `yaml:"imap"`
 	Forwarding ForwardingConfig `yaml:"forwarding"`
+	Alerts     AlertsConfig     `yaml:"alerts"`
 	Log        LogConfig        `yaml:"log"`
 }
 
@@ -80,6 +81,21 @@ type LogConfig struct {
 	Pretty bool `yaml:"pretty"`
 }
 
+// AlertsConfig controls email notifications for operational issues.
+type AlertsConfig struct {
+	// Email is the address to send alert notifications to.
+	// Leave empty to disable alerts.
+	Email string `yaml:"email"`
+	// CooldownMinutes is the minimum time between repeated alerts of the same type.
+	// Defaults to 30.
+	CooldownMinutes int `yaml:"cooldown_minutes"`
+}
+
+// AlertsEnabled reports whether alert notifications are configured.
+func (c *Config) AlertsEnabled() bool {
+	return c.Alerts.Email != ""
+}
+
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
@@ -101,6 +117,9 @@ func DefaultConfig() Config {
 			Port:            993,
 			ReplyWindowDays: 7,
 			MaxAttachmentMB: 5,
+		},
+		Alerts: AlertsConfig{
+			CooldownMinutes: 30,
 		},
 		Log: LogConfig{
 			Level:  "info",
@@ -221,10 +240,16 @@ forwarding:
   forward_location: true
 
 log:
-  # level: debug | info | warn | error
+  # level: trace | debug | info | warn | error
   level: "info"
   # pretty: true for human-readable output, false for JSON (better for log aggregators).
   pretty: true
+
+# Optional: receive email alerts when something goes wrong (Garmin disconnected,
+# IMAP auth failure, session expired). Leave empty to disable.
+# alerts:
+#   email: "admin@example.com"
+#   cooldown_minutes: 30
 `
 	return os.WriteFile(path, []byte(example), 0o644)
 }
