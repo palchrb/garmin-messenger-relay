@@ -52,13 +52,10 @@ Create a directory for your data and add your config:
 
 ```bash
 mkdir -p garmin-relay-data
-cd garmin-relay-data
 
-# Option A: Create config manually
-cat > config.yaml << 'EOF'
+cat > garmin-relay-data/config.yaml << 'EOF'
 garmin:
   phone: "+4712345678"
-  session_dir: "/data/sessions"
 
 smtp:
   host: "smtp.gmail.com"
@@ -93,9 +90,9 @@ You must authenticate interactively before starting the relay:
 
 ```bash
 docker run -it --rm \
-  -v $(pwd):/data \
+  -v ./garmin-relay-data:/data \
   ghcr.io/palchrb/garmin-messenger-relay:latest \
-  login -config /data/config.yaml
+  login
 ```
 
 This will:
@@ -111,7 +108,7 @@ You only need to do this once. The session refreshes automatically.
 docker run -d \
   --name garmin-relay \
   --restart unless-stopped \
-  -v $(pwd):/data \
+  -v ./garmin-relay-data:/data \
   ghcr.io/palchrb/garmin-messenger-relay:latest
 ```
 
@@ -128,7 +125,7 @@ services:
 
 ```bash
 # First-time login
-docker compose run --rm garmin-relay login -config /data/config.yaml
+docker compose run --rm garmin-relay login
 
 # Start the relay
 docker compose up -d
@@ -138,9 +135,9 @@ docker compose up -d
 
 ```bash
 docker run --rm \
-  -v $(pwd):/data \
+  -v ./garmin-relay-data:/data \
   ghcr.io/palchrb/garmin-messenger-relay:latest \
-  status -config /data/config.yaml
+  status
 ```
 
 ### View logs
@@ -153,9 +150,9 @@ docker logs -f garmin-relay
 
 ```bash
 docker run --rm \
-  -v $(pwd):/data \
+  -v ./garmin-relay-data:/data \
   ghcr.io/palchrb/garmin-messenger-relay:latest \
-  test-smtp -config /data/config.yaml
+  test-smtp
 ```
 
 ## Configuration
