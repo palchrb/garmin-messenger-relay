@@ -246,7 +246,6 @@ func (c *IMAPClient) fetchUnseenSince(ctx context.Context, client *imapclient.Cl
 			continue
 		}
 		if reply == nil {
-			c.log.Debug("Skipping message (not a relay reply)")
 			continue
 		}
 		c.log.Info("Parsed inbound reply", "from", reply.From, "in_reply_to", reply.InReplyTo)
@@ -291,16 +290,20 @@ func (c *IMAPClient) parseMessage(msg *imapclient.FetchMessageData) (*InboundRep
 	}
 	header := mr.Header
 
+	subject := header.Get("Subject")
+	fromHeader := header.Get("From")
+
 	inReplyTo := strings.TrimSpace(header.Get("In-Reply-To"))
 	if inReplyTo == "" {
-		c.log.Debug("Skipping non-reply email (no In-Reply-To header)")
+		c.log.Debug("Skipping non-reply email (no In-Reply-To header)", "from", fromHeader, "subject", subject)
 		return nil, nil
 	}
 	// Only process replies to emails we sent (our Message-IDs contain "gmr-").
 	if !strings.Contains(inReplyTo, "gmr-") {
-		c.log.Debug("Skipping reply to non-relay email", "in_reply_to", inReplyTo)
+		c.log.Debug("Skipping reply to non-relay email", "in_reply_to", inReplyTo, "from", fromHeader, "subject", subject)
 		return nil, nil
 	}
+	c.log.Debug("Processing relay reply", "in_reply_to", inReplyTo, "from", fromHeader, "subject", subject)
 
 	from, err := header.AddressList("From")
 	if err != nil || len(from) == 0 {
