@@ -198,16 +198,23 @@ func (r *Relay) handleReply(ctx context.Context, reply InboundReply) {
 	}
 
 	if len(reply.Attachments) > 0 {
-		// Send the first attachment with the reply text as caption.
-		// Subsequent attachments are sent without caption.
-		for i, att := range reply.Attachments {
+		captionSent := false
+		for _, att := range reply.Attachments {
 			c := ""
-			if i == 0 {
+			if !captionSent {
 				c = caption
 			}
 			if err := r.forwardAttachmentToGarmin(ctx, to, att, c); err != nil {
 				r.log.Error("failed to forward attachment to Garmin",
 					"filename", att.Filename, "err", err)
+			} else if c != "" {
+				captionSent = true
+			}
+		}
+		// If all attachments failed, send the text as a standalone message.
+		if !captionSent && caption != "" {
+			if _, err := r.api.SendMessage(ctx, to, caption); err != nil {
+				r.log.Error("failed to send reply text to Garmin", "err", err)
 			}
 		}
 	} else if caption != "" {
