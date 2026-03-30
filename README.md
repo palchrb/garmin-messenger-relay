@@ -1,6 +1,6 @@
 # garmin-messenger-relay
 
-Forward messages from Garmin Messenger (inReach) to email, and send replies back to Garmin.
+Forward messages from Garmin Messenger (inReach) to email, and send replies back to Garmin messenger via email. This implementation was made possible due to the slush-dev/garmin-messenger library. Compared to the other garmin media relays i made, this one let's you connect directly to garmin's services, and does NOT require running the garmin messenger app itself in e.g. waydroid/redroid. Use at your own risk, and I have so far only tested it in the docker version, with a single default recipient in the config.yaml. Remember to test your use case thoroughly so you know it works, since satellite messages can be expensive.. 
 
 ## Features
 
