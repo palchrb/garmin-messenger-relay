@@ -95,7 +95,7 @@ func configFlag() string {
 	return defaultConfig
 }
 
-// setupLogger configures zerolog from the log config.
+// setupLogger configures zerolog and slog from the log config.
 func setupLogger(cfg *relay.Config) {
 	level, err := zerolog.ParseLevel(cfg.Log.Level)
 	if err != nil {
@@ -106,6 +106,20 @@ func setupLogger(cfg *relay.Config) {
 	if cfg.Log.Pretty {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 	}
+
+	// Configure slog (used by relay internals) to the same level.
+	var slogLevel slog.Level
+	switch cfg.Log.Level {
+	case "debug":
+		slogLevel = slog.LevelDebug
+	case "warn":
+		slogLevel = slog.LevelWarn
+	case "error":
+		slogLevel = slog.LevelError
+	default:
+		slogLevel = slog.LevelInfo
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slogLevel})))
 }
 
 // cmdInit writes an example config.yaml.

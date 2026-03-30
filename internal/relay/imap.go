@@ -283,10 +283,12 @@ func (c *IMAPClient) parseMessage(msg *imapclient.FetchMessageData) (*InboundRep
 
 	inReplyTo := strings.TrimSpace(header.Get("In-Reply-To"))
 	if inReplyTo == "" {
+		c.log.Debug("Skipping non-reply email (no In-Reply-To header)")
 		return nil, nil
 	}
 	// Only process replies to emails we sent (our Message-IDs contain "gmr-").
 	if !strings.Contains(inReplyTo, "gmr-") {
+		c.log.Debug("Skipping reply to non-relay email", "in_reply_to", inReplyTo)
 		return nil, nil
 	}
 
