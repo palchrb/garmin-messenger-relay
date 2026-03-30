@@ -194,6 +194,12 @@ forwarding:
 log:
   level: "info"                # Log level: trace, debug, info, warn, error.
   pretty: true                 # Human-readable logs (false for JSON).
+
+# Optional: email alerts for operational issues (Garmin disconnect, IMAP auth
+# failure, session expiry). Leave empty or omit to disable.
+# alerts:
+#   email: "admin@example.com"
+#   cooldown_minutes: 30       # Minimum minutes between repeated alerts.
 ```
 
 ### Gmail setup
@@ -255,6 +261,74 @@ Replies are validated with multiple checks to prevent spam or accidental forward
 - The `In-Reply-To` Message-ID must exist in the relay's sent message store
 - The sender (`From`) must match the original recipient
 - The original message must be within the reply window (default: 7 days)
+
+## Running as a system service
+
+### Linux (systemd)
+
+A systemd service file is included in the repository.
+
+```bash
+# Create a dedicated user
+sudo useradd -r -s /sbin/nologin garmin-relay
+
+# Set up the install directory
+sudo mkdir -p /opt/garmin-messenger-relay
+sudo cp garmin-messenger-relay /opt/garmin-messenger-relay/
+sudo cp config.yaml /opt/garmin-messenger-relay/
+
+# Authenticate (run as the service user)
+sudo -u garmin-relay /opt/garmin-messenger-relay/garmin-messenger-relay \
+  login -config /opt/garmin-messenger-relay/config.yaml
+
+# Install and start the service
+sudo cp garmin-messenger-relay.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now garmin-messenger-relay
+
+# Check status and logs
+sudo systemctl status garmin-messenger-relay
+sudo journalctl -u garmin-messenger-relay -f
+```
+
+### Windows (Task Scheduler)
+
+The Windows binary works as-is — just download the `.exe` from [Releases](../../releases). To run it automatically at startup:
+
+1. Open **Task Scheduler** (`taskschd.msc`)
+2. Click **Create Task** (not "Create Basic Task")
+3. **General** tab:
+   - Name: `Garmin Messenger Relay`
+   - Check **Run whether user is logged on or not**
+   - Check **Run with highest privileges**
+4. **Triggers** tab → New:
+   - Begin the task: **At startup**
+5. **Actions** tab → New:
+   - Action: **Start a program**
+   - Program: `C:\garmin-relay\garmin-messenger-relay.exe`
+   - Arguments: `run -config C:\garmin-relay\config.yaml`
+   - Start in: `C:\garmin-relay`
+6. **Settings** tab:
+   - Check **If the task fails, restart every** → `1 minute`, up to `3` times
+   - Uncheck **Stop the task if it runs longer than**
+7. Click **OK** and enter your Windows password
+
+Set up the relay directory and config before creating the task:
+
+```cmd
+mkdir C:\garmin-relay
+cd C:\garmin-relay
+
+:: Download the .exe from GitHub Releases and place it here, then:
+garmin-messenger-relay.exe init
+:: Edit config.yaml with your settings (Notepad, VS Code, etc.)
+
+:: Authenticate (one-time)
+garmin-messenger-relay.exe login
+```
+
+> **Note:** ffmpeg must be installed and on your PATH for media transcoding.
+> Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add the `bin` folder to your system PATH.
 
 ## Build from source
 

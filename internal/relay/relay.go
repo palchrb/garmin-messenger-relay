@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,6 +29,7 @@ type Relay struct {
 	mailer   *Mailer
 	store    *MsgStore
 	imap     *IMAPClient
+	alerter  *Alerter
 	log      *slog.Logger
 }
 
@@ -53,17 +55,18 @@ func New(cfg *Config, log *slog.Logger) (*Relay, error) {
 	}
 
 	r := &Relay{
-		cfg:    cfg,
-		auth:   auth,
-		api:    api,
-		sr:     sr,
-		mailer: mailer,
-		store:  store,
-		log:    log,
+		cfg:     cfg,
+		auth:    auth,
+		api:     api,
+		sr:      sr,
+		mailer:  mailer,
+		store:   store,
+		alerter: NewAlerter(cfg.Alerts, mailer, log),
+		log:     log,
 	}
 
 	if cfg.IMAPEnabled() {
-		r.imap = NewIMAPClient(cfg.IMAP, log)
+		r.imap = NewIMAPClient(cfg.IMAP, log, r.alerter)
 	}
 
 	return r, nil
@@ -79,6 +82,10 @@ func (r *Relay) Resume(ctx context.Context) error {
 func (r *Relay) Run(ctx context.Context) error {
 	// Validate session with a lightweight API call.
 	if _, err := r.api.GetConversations(ctx, gm.WithLimit(1)); err != nil {
+		r.alerter.Send(AlertSessionExpired,
+			"Garmin session expired",
+			fmt.Sprintf("The relay could not connect to Garmin Messenger.\n"+
+				"Error: %v\n\nRun 'garmin-messenger-relay login' to re-authenticate.", err))
 		return fmt.Errorf("connecting to Garmin Messenger: %w\n\nRun 'garmin-messenger-relay login' to authenticate", err)
 	}
 
@@ -88,12 +95,33 @@ func (r *Relay) Run(ctx context.Context) error {
 		r.handleMessage(msg)
 	})
 
+	// Alert only if SignalR stays disconnected for 5 minutes — brief
+	// reconnects are normal and should not trigger email alerts.
+	var disconnectTimer *time.Timer
+	var disconnectMu sync.Mutex
+
 	r.sr.OnOpen(func() {
 		r.log.Info("SignalR connected")
+		disconnectMu.Lock()
+		if disconnectTimer != nil {
+			disconnectTimer.Stop()
+			disconnectTimer = nil
+		}
+		disconnectMu.Unlock()
 	})
 
 	r.sr.OnClose(func() {
 		r.log.Warn("SignalR disconnected — will reconnect automatically")
+		disconnectMu.Lock()
+		if disconnectTimer == nil {
+			disconnectTimer = time.AfterFunc(5*time.Minute, func() {
+				r.alerter.Send(AlertSignalRDisconnect,
+					"Garmin SignalR disconnected for 5+ minutes",
+					"The relay has been unable to reconnect to Garmin Messenger for over 5 minutes.\n\n"+
+						"Check the logs or run 'garmin-messenger-relay status'.")
+			})
+		}
+		disconnectMu.Unlock()
 	})
 
 	r.sr.OnError(func(err error) {

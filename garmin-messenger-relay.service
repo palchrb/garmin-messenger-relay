@@ -1,0 +1,23 @@
+[Unit]
+Description=Garmin Messenger Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=garmin-relay
+Group=garmin-relay
+WorkingDirectory=/opt/garmin-messenger-relay
+ExecStart=/opt/garmin-messenger-relay/garmin-messenger-relay run -config /opt/garmin-messenger-relay/config.yaml
+Restart=on-failure
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/garmin-messenger-relay
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
