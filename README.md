@@ -181,9 +181,9 @@ Copy `config.example.yaml` to `config.yaml` and edit it. The full config with al
 
 ### Caption routing
 
-When `caption_routing` is enabled, you can include email addresses in a media caption on your Garmin device. The relay parses them and routes that specific message to those addresses.
+When `caption_routing` is enabled, the relay scans the entire media caption for email addresses and forwards the message to **all** addresses found, in addition to your default recipients.
 
-Example: Send a photo from your inReach with caption `"admin@example.com, boss@work.com Base camp reached"` — the photo and caption will be forwarded to both addresses in addition to your default recipients.
+Example: Send a photo from your inReach with caption `"admin@example.com, boss@work.com Base camp reached"` — the photo and caption will be forwarded to both `admin@example.com` and `boss@work.com` in addition to your default recipients. The addresses can appear anywhere in the caption and don't need any special separator.
 
 Set `caption_routing_replaces_default: true` if you want caption addresses to **replace** the default recipients instead of being added to them.
 
