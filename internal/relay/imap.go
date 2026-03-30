@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -229,9 +230,8 @@ func (c *IMAPClient) fetchUnseenSince(ctx context.Context, client *imapclient.Cl
 
 	seqSet := imap.SeqSetNum(searchData.AllSeqNums()...)
 	fetchOptions := &imap.FetchOptions{
-		Envelope: true,
 		BodySection: []*imap.FetchItemBodySection{
-			{}, // fetch whole message
+			{Peek: true}, // BODY.PEEK[] — fetch whole message without setting \Seen
 		},
 	}
 	messages := client.Fetch(seqSet, fetchOptions)
@@ -270,21 +270,27 @@ func (c *IMAPClient) fetchUnseenSince(ctx context.Context, client *imapclient.Cl
 // parseMessage extracts an InboundReply from a fetched IMAP message.
 // Returns nil, nil if the message is not a reply to one of our outgoing emails.
 func (c *IMAPClient) parseMessage(msg *imapclient.FetchMessageData) (*InboundReply, error) {
-	var bodyLiteral imap.LiteralReader
+	// Read the body section immediately — the literal reader is invalidated
+	// once msg.Next() is called again (stream-based protocol).
+	var bodyData []byte
 	for {
 		item := msg.Next()
 		if item == nil {
 			break
 		}
 		if bs, ok := item.(imapclient.FetchItemDataBodySection); ok {
-			bodyLiteral = bs.Literal
+			var err error
+			bodyData, err = io.ReadAll(bs.Literal)
+			if err != nil {
+				return nil, fmt.Errorf("reading message body: %w", err)
+			}
 		}
 	}
-	if bodyLiteral == nil {
+	if bodyData == nil {
 		return nil, fmt.Errorf("no body section")
 	}
 
-	mr, err := mail.CreateReader(bodyLiteral)
+	mr, err := mail.CreateReader(bytes.NewReader(bodyData))
 	if err != nil {
 		return nil, fmt.Errorf("parsing mail: %w", err)
 	}
