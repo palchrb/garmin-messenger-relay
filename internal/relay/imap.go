@@ -172,6 +172,7 @@ func (c *IMAPClient) runIdle(ctx context.Context, client *imapclient.Client) err
 			go func() { idleDone <- idleCmd.Wait() }()
 
 		case <-c.newMsg:
+			c.log.Info("IMAP: new message notification received (EXISTS)")
 			// Server pushed EXISTS: new message arrived. Stop IDLE, fetch, restart.
 			if err := idleCmd.Close(); err != nil {
 				return fmt.Errorf("IMAP IDLE close on new msg: %w", err)
@@ -216,8 +217,10 @@ func (c *IMAPClient) fetchUnseen(ctx context.Context, client *imapclient.Client)
 		return fmt.Errorf("IMAP SEARCH UNSEEN: %w", err)
 	}
 	if len(searchData.AllSeqNums()) == 0 {
+		c.log.Debug("No unseen messages in INBOX")
 		return nil
 	}
+	c.log.Info("Found unseen messages", "count", len(searchData.AllSeqNums()))
 
 	seqSet := imap.SeqSetNum(searchData.AllSeqNums()...)
 	fetchOptions := &imap.FetchOptions{
@@ -234,12 +237,14 @@ func (c *IMAPClient) fetchUnseen(ctx context.Context, client *imapclient.Client)
 		}
 		reply, err := c.parseMessage(msg)
 		if err != nil {
-			c.log.Warn("skipping unparseable message", "err", err)
+			c.log.Warn("Skipping unparseable message", "err", err)
 			continue
 		}
 		if reply == nil {
+			c.log.Debug("Skipping message (not a relay reply)")
 			continue
 		}
+		c.log.Info("Parsed inbound reply", "from", reply.From, "in_reply_to", reply.InReplyTo)
 		select {
 		case c.Replies <- *reply:
 		case <-ctx.Done():
