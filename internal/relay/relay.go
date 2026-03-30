@@ -136,7 +136,7 @@ func (r *Relay) processReplies(ctx context.Context) {
 func (r *Relay) handleReply(ctx context.Context, reply InboundReply) {
 	sent, ok := r.store.Lookup(reply.InReplyTo)
 	if !ok {
-		r.log.Debug("reply to unknown/expired message, ignoring", "in_reply_to", reply.InReplyTo)
+		r.log.Info("Reply to unknown/expired message, ignoring", "in_reply_to", reply.InReplyTo, "from", reply.From)
 		return
 	}
 
