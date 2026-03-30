@@ -262,6 +262,67 @@ Replies are validated with multiple checks to prevent spam or accidental forward
 - The sender (`From`) must match the original recipient
 - The original message must be within the reply window (default: 7 days)
 
+## Running as a system service
+
+### Linux (systemd)
+
+A systemd service file is included in the repository.
+
+```bash
+# Create a dedicated user
+sudo useradd -r -s /sbin/nologin garmin-relay
+
+# Set up the install directory
+sudo mkdir -p /opt/garmin-messenger-relay
+sudo cp garmin-messenger-relay /opt/garmin-messenger-relay/
+sudo cp config.yaml /opt/garmin-messenger-relay/
+
+# Authenticate (run as the service user)
+sudo -u garmin-relay /opt/garmin-messenger-relay/garmin-messenger-relay \
+  login -config /opt/garmin-messenger-relay/config.yaml
+
+# Install and start the service
+sudo cp garmin-messenger-relay.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now garmin-messenger-relay
+
+# Check status and logs
+sudo systemctl status garmin-messenger-relay
+sudo journalctl -u garmin-messenger-relay -f
+```
+
+### Windows (Task Scheduler)
+
+The Windows binary works as-is — just download the `.exe` from [Releases](../../releases). To run it automatically at startup:
+
+1. Open **Task Scheduler** (`taskschd.msc`)
+2. Click **Create Task** (not "Create Basic Task")
+3. **General** tab:
+   - Name: `Garmin Messenger Relay`
+   - Check **Run whether user is logged on or not**
+   - Check **Run with highest privileges**
+4. **Triggers** tab → New:
+   - Begin the task: **At startup**
+5. **Actions** tab → New:
+   - Action: **Start a program**
+   - Program: `C:\garmin-relay\garmin-messenger-relay.exe`
+   - Arguments: `run -config C:\garmin-relay\config.yaml`
+   - Start in: `C:\garmin-relay`
+6. **Settings** tab:
+   - Check **If the task fails, restart every** → `1 minute`, up to `3` times
+   - Uncheck **Stop the task if it runs longer than**
+7. Click **OK** and enter your Windows password
+
+Before creating the task, authenticate once from a terminal:
+
+```cmd
+cd C:\garmin-relay
+garmin-messenger-relay.exe login -config config.yaml
+```
+
+> **Note:** ffmpeg must be installed and on your PATH for media transcoding.
+> Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add the `bin` folder to your system PATH.
+
 ## Build from source
 
 Requires Go 1.24+ and ffmpeg (runtime dependency for media transcoding).
