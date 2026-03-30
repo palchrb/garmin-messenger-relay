@@ -44,7 +44,7 @@ The relay connects to Garmin Messenger via SignalR, listens for incoming message
 
 ## Docker
 
-The Docker image includes ffmpeg and runs as an unprivileged user. All data (config, session tokens) is stored in a single `/data` volume.
+The Docker image includes ffmpeg and handles bind-mount permissions automatically. All data (config, session tokens) is stored in a single `/data` volume. The container starts as root to fix volume ownership, then drops to an unprivileged `relay` user before running the application.
 
 ### Setup
 

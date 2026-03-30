@@ -19,15 +19,16 @@ RUN CGO_ENABLED=0 go build \
 # Runtime stage
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates ffmpeg tzdata
+RUN apk add --no-cache ca-certificates ffmpeg tzdata su-exec
 
 COPY --from=builder /garmin-messenger-relay /usr/local/bin/garmin-messenger-relay
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 RUN addgroup -S relay && adduser -S relay -G relay
-USER relay
 
 WORKDIR /data
 VOLUME ["/data"]
 
-ENTRYPOINT ["garmin-messenger-relay"]
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["run", "-config", "/data/config.yaml"]
