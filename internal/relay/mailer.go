@@ -227,7 +227,9 @@ func (m *Mailer) buildRaw(msg Message) ([]byte, error) {
 		buf.WriteString("Content-Transfer-Encoding: quoted-printable\r\n")
 		buf.WriteString("\r\n")
 		qw := quotedprintable.NewWriter(&buf)
-		qw.Write([]byte(msg.Body))
+		if _, err := qw.Write([]byte(msg.Body)); err != nil {
+			return nil, err
+		}
 		qw.Close()
 		return buf.Bytes(), nil
 	}
