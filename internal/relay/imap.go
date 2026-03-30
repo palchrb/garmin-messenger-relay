@@ -402,6 +402,17 @@ func stripQuotedReply(body string) string {
 			break
 		}
 
+		// Stop at Proton Mail / iOS separator
+		if strings.HasPrefix(trimmed, "-------- Original Message --------") {
+			break
+		}
+
+		// Stop at "Sent from" boilerplate (iOS, Proton Mail, Samsung, etc.)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "sent from ") {
+			break
+		}
+
 		// Stop at common signature markers
 		if trimmed == "--" || trimmed == "-- " {
 			break

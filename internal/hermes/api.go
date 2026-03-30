@@ -394,7 +394,7 @@ func (api *HermesAPI) DownloadMedia(ctx context.Context, msgUUID, mediaID, messa
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	api.logger.Log(nil, LevelTrace, "<<< Response", "status", resp.StatusCode, "bytes", len(respBody))
+	api.logger.Log(context.TODO(), LevelTrace, "<<< Response", "status", resp.StatusCode, "bytes", len(respBody))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &APIError{
@@ -662,30 +662,30 @@ func (api *HermesAPI) doMutate(ctx context.Context, method, path string, reqBody
 }
 
 func (api *HermesAPI) logRequest(method, url string, headers http.Header, body []byte) {
-	api.logger.Log(nil, LevelTrace, ">>> "+method, "url", url)
+	api.logger.Log(context.TODO(), LevelTrace, ">>> "+method, "url", url)
 	for k, v := range headers {
 		val := v[0]
 		if len(v) > 1 {
 			val = fmt.Sprintf("%v", v)
 		}
 		if len(val) > 120 {
-			api.logger.Log(nil, LevelTrace, "  Request header", "key", k, "value", val[:60]+"..."+val[len(val)-20:])
+			api.logger.Log(context.TODO(), LevelTrace, "  Request header", "key", k, "value", val[:60]+"..."+val[len(val)-20:])
 		} else {
-			api.logger.Log(nil, LevelTrace, "  Request header", "key", k, "value", val)
+			api.logger.Log(context.TODO(), LevelTrace, "  Request header", "key", k, "value", val)
 		}
 	}
 	if body != nil {
-		api.logger.Log(nil, LevelTrace, "  Request body", "json", truncate(string(body), 2000))
+		api.logger.Log(context.TODO(), LevelTrace, "  Request body", "json", truncate(string(body), 2000))
 	}
 }
 
 func (api *HermesAPI) logResponse(resp *http.Response, body []byte) {
-	api.logger.Log(nil, LevelTrace, "<<< Response", "status", resp.StatusCode, "url", resp.Request.URL.String(), "bytes", len(body))
+	api.logger.Log(context.TODO(), LevelTrace, "<<< Response", "status", resp.StatusCode, "url", resp.Request.URL.String(), "bytes", len(body))
 	for k, v := range resp.Header {
-		api.logger.Log(nil, LevelTrace, "  Response header", "key", k, "value", v[0])
+		api.logger.Log(context.TODO(), LevelTrace, "  Response header", "key", k, "value", v[0])
 	}
 	if len(body) > 0 {
-		api.logger.Log(nil, LevelTrace, "  Response body", "json", truncate(string(body), 2000))
+		api.logger.Log(context.TODO(), LevelTrace, "  Response body", "json", truncate(string(body), 2000))
 	}
 }
 
