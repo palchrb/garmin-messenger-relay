@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -454,27 +455,40 @@ func (r *Relay) resolveMediaUUID(ctx context.Context, msg gm.MessageModel) (uuid
 }
 
 // transcodeImageToAVIF converts image data (JPEG, PNG, etc.) to AVIF using ffmpeg.
+// The AVIF muxer requires seekable output, so we write to a temp file.
 func transcodeImageToAVIF(ctx context.Context, data []byte) ([]byte, error) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		return nil, fmt.Errorf("ffmpeg not found")
 	}
+	tmp, err := os.CreateTemp("", "garmin-avif-*.avif")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	defer os.Remove(tmpPath)
+
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-i", "pipe:0",
-		"-f", "avif", "-c:v", "libaom-av1", "-crf", "30", "-b:v", "0",
-		"pipe:1",
+		"-vf", "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease:flags=lanczos",
+		"-c:v", "libaom-av1",
+		"-crf", "30", "-b:v", "0",
+		"-cpu-used", "6",
+		"-pix_fmt", "yuv444p",
+		"-y", tmpPath,
 	)
 	cmd.Stdin = bytes.NewReader(data)
-	var out, errBuf bytes.Buffer
-	cmd.Stdout = &out
+	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("ffmpeg avif: %w: %s", err, errBuf.String())
 	}
-	return out.Bytes(), nil
+	return os.ReadFile(tmpPath)
 }
 
-// transcodeAudioToOGG converts audio data (MP3, M4A, WAV, etc.) to OGG Opus at 48kHz.
+// transcodeAudioToOGG converts audio data (MP3, M4A, WAV, etc.) to OGG Opus.
+// Uses mono 16kbps at 48kHz with a 30-second limit for satellite bandwidth.
 func transcodeAudioToOGG(ctx context.Context, data []byte) ([]byte, error) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		return nil, fmt.Errorf("ffmpeg not found")
@@ -482,8 +496,12 @@ func transcodeAudioToOGG(ctx context.Context, data []byte) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-i", "pipe:0",
-		"-f", "ogg", "-c:a", "libopus", "-ar", "48000", "-b:a", "32k",
-		"pipe:1",
+		"-t", "30",
+		"-ar", "48000",
+		"-ac", "1",
+		"-c:a", "libopus",
+		"-b:a", "16k",
+		"-f", "ogg", "pipe:1",
 	)
 	cmd.Stdin = bytes.NewReader(data)
 	var out, errBuf bytes.Buffer
