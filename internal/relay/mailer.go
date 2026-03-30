@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/mail"
 	"net/smtp"
 	"net/textproto"
@@ -223,8 +224,11 @@ func (m *Mailer) buildRaw(msg Message) ([]byte, error) {
 
 	if len(msg.Attachments) == 0 {
 		buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+		buf.WriteString("Content-Transfer-Encoding: quoted-printable\r\n")
 		buf.WriteString("\r\n")
-		buf.WriteString(msg.Body)
+		qw := quotedprintable.NewWriter(&buf)
+		qw.Write([]byte(msg.Body))
+		qw.Close()
 		return buf.Bytes(), nil
 	}
 
@@ -241,9 +245,11 @@ func (m *Mailer) buildRaw(msg Message) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tw.Write([]byte(msg.Body)); err != nil {
+	qw := quotedprintable.NewWriter(tw)
+	if _, err := qw.Write([]byte(msg.Body)); err != nil {
 		return nil, err
 	}
+	qw.Close()
 
 	// Attachment parts
 	for _, a := range msg.Attachments {

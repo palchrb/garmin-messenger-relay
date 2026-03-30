@@ -483,22 +483,25 @@ type loggingRoundTripper struct {
 	logger *slog.Logger
 }
 
+// levelTrace is a log level below Debug for verbose HTTP details.
+const levelTrace = slog.Level(-8)
+
 func (t *loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Log request
-	t.logger.Debug(">>> "+req.Method, "url", req.URL.String())
+	t.logger.Log(nil, levelTrace, ">>> "+req.Method, "url", req.URL.String())
 	for k, v := range req.Header {
 		val := strings.Join(v, ", ")
 		if len(val) > 120 {
-			t.logger.Debug("  Request header", "key", k, "value", val[:60]+"..."+val[len(val)-20:])
+			t.logger.Log(nil, levelTrace, "  Request header", "key", k, "value", val[:60]+"..."+val[len(val)-20:])
 		} else {
-			t.logger.Debug("  Request header", "key", k, "value", val)
+			t.logger.Log(nil, levelTrace, "  Request header", "key", k, "value", val)
 		}
 	}
 	if req.Body != nil && req.Body != http.NoBody {
 		bodyBytes, err := io.ReadAll(req.Body)
 		req.Body.Close()
 		if err == nil {
-			t.logger.Debug("  Request body", "length", len(bodyBytes), "data", truncate(string(bodyBytes), 2000))
+			t.logger.Log(nil, levelTrace, "  Request body", "length", len(bodyBytes), "data", truncate(string(bodyBytes), 2000))
 			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 	}
@@ -506,19 +509,19 @@ func (t *loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	// Execute
 	resp, err := t.inner.RoundTrip(req)
 	if err != nil {
-		t.logger.Debug("<<< Error", "error", err)
+		t.logger.Log(nil, levelTrace, "<<< Error", "error", err)
 		return nil, err
 	}
 
 	// Log response (read body, log, replace)
-	t.logger.Debug("<<< Response", "status", resp.StatusCode, "url", req.URL.String())
+	t.logger.Log(nil, levelTrace, "<<< Response", "status", resp.StatusCode, "url", req.URL.String())
 	for k, v := range resp.Header {
-		t.logger.Debug("  Response header", "key", k, "value", strings.Join(v, ", "))
+		t.logger.Log(nil, levelTrace, "  Response header", "key", k, "value", strings.Join(v, ", "))
 	}
 	respBody, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if readErr == nil {
-		t.logger.Debug("  Response body", "length", len(respBody), "data", truncate(string(respBody), 2000))
+		t.logger.Log(nil, levelTrace, "  Response body", "length", len(respBody), "data", truncate(string(respBody), 2000))
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 	}
 
