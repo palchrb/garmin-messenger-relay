@@ -48,39 +48,52 @@ The Docker image includes ffmpeg and handles bind-mount permissions automaticall
 
 ### Setup
 
-Create a directory for your data and add your config:
+Create a directory for your data and add your config (see [Configuration](#configuration) for all options):
 
 ```bash
 mkdir -p garmin-relay-data
 
 cat > garmin-relay-data/config.yaml << 'EOF'
 garmin:
-  phone: "+4712345678"
+  phone: "+4712345678"          # Required. E.164 phone number for Garmin Messenger.
+  session_dir: "./sessions"     # Where session tokens are stored.
 
 smtp:
-  host: "smtp.gmail.com"
-  port: 587
-  username: "you@gmail.com"
-  password: "your-app-password"
-  from: "Garmin Relay <you@gmail.com>"
-  tls: "starttls"
+  host: "smtp.gmail.com"       # Required. SMTP server hostname.
+  port: 587                    # SMTP port (587 for STARTTLS, 465 for SSL, 25 for plain).
+  username: "you@gmail.com"    # SMTP username.
+  password: "your-app-password" # SMTP password. For Gmail, use an App Password.
+  from: "Garmin Relay <you@gmail.com>" # Required. Sender address shown in forwarded emails.
+  tls: "starttls"              # Connection security: "starttls", "ssl", or "none".
 
+# IMAP is optional. Enable it for two-way messaging (receive email replies
+# and send them back to Garmin). Without IMAP, the relay is one-way only.
 imap:
-  host: "imap.gmail.com"
-  port: 993
+  host: "imap.gmail.com"       # IMAP server hostname. Leave empty to disable.
+  port: 993                    # IMAP port (993 for TLS).
   username: "you@gmail.com"
   password: "your-app-password"
+  reply_window_days: 7         # Ignore replies to messages older than this.
+  max_attachment_mb: 5         # Maximum size per email attachment in MB.
 
 forwarding:
-  default_recipients:
-    - "recipient@example.com"
-  forward_text: true
-  forward_media: true
-  forward_location: true
+  default_recipients:          # Required. Emails that receive all Garmin messages.
+    - "you@example.com"
+  caption_routing: true        # Parse email addresses from media captions.
+  caption_routing_replaces_default: false  # If true, caption addresses replace defaults.
+  forward_text: true           # Forward text messages.
+  forward_media: true          # Forward media attachments (images, audio).
+  forward_location: true       # Forward GPS location and map links.
 
 log:
-  level: "info"
-  pretty: true
+  level: "info"                # Log level: trace, debug, info, warn, error.
+  pretty: true                 # Human-readable logs (false for JSON).
+
+# Optional: email alerts for operational issues (Garmin disconnect, IMAP auth
+# failure, session expiry). Leave empty or omit to disable.
+# alerts:
+#   email: "admin@example.com"
+#   cooldown_minutes: 30       # Minimum minutes between repeated alerts.
 EOF
 ```
 
@@ -157,50 +170,7 @@ docker run --rm \
 
 ## Configuration
 
-Copy `config.example.yaml` to `config.yaml` and edit it. All options with defaults:
-
-```yaml
-garmin:
-  phone: "+4712345678"          # Required. E.164 phone number for Garmin Messenger.
-  session_dir: "./sessions"     # Where session tokens are stored.
-
-smtp:
-  host: "smtp.gmail.com"       # Required. SMTP server hostname.
-  port: 587                    # SMTP port (587 for STARTTLS, 465 for SSL, 25 for plain).
-  username: "you@gmail.com"    # SMTP username.
-  password: "your-app-password" # SMTP password. For Gmail, use an App Password.
-  from: "Garmin <you@gmail.com>" # Required. Sender address shown in forwarded emails.
-  tls: "starttls"              # Connection security: "starttls", "ssl", or "none".
-
-# IMAP is optional. Enable it for two-way messaging (receive email replies
-# and send them back to Garmin). Without IMAP, the relay is one-way only.
-imap:
-  host: "imap.gmail.com"       # IMAP server hostname. Leave empty to disable.
-  port: 993                    # IMAP port (993 for TLS).
-  username: "you@gmail.com"
-  password: "your-app-password"
-  reply_window_days: 7         # Ignore replies to messages older than this.
-  max_attachment_mb: 5         # Maximum size per email attachment in MB.
-
-forwarding:
-  default_recipients:          # Required. Emails that receive all Garmin messages.
-    - "you@example.com"
-  caption_routing: true        # Parse email addresses from media captions.
-  caption_routing_replaces_default: false  # If true, caption addresses replace defaults.
-  forward_text: true           # Forward text messages.
-  forward_media: true          # Forward media attachments (images, audio).
-  forward_location: true       # Forward GPS location and map links.
-
-log:
-  level: "info"                # Log level: trace, debug, info, warn, error.
-  pretty: true                 # Human-readable logs (false for JSON).
-
-# Optional: email alerts for operational issues (Garmin disconnect, IMAP auth
-# failure, session expiry). Leave empty or omit to disable.
-# alerts:
-#   email: "admin@example.com"
-#   cooldown_minutes: 30       # Minimum minutes between repeated alerts.
-```
+Copy `config.example.yaml` to `config.yaml` and edit it. The full config with all options and defaults is shown in the [Docker setup](#setup) above.
 
 ### Gmail setup
 
@@ -211,9 +181,9 @@ log:
 
 ### Caption routing
 
-When `caption_routing` is enabled, you can include email addresses in a media caption on your Garmin device. The relay will parse them and route that specific message to those addresses.
+When `caption_routing` is enabled, you can include email addresses in a media caption on your Garmin device. The relay parses them and routes that specific message to those addresses.
 
-Example: Send a photo from your inReach with caption `"Base camp reached admin@example.com"` — the photo and caption will be forwarded to `admin@example.com` in addition to your default recipients.
+Example: Send a photo from your inReach with caption `"admin@example.com, boss@work.com Base camp reached"` — the photo and caption will be forwarded to both addresses in addition to your default recipients.
 
 Set `caption_routing_replaces_default: true` if you want caption addresses to **replace** the default recipients instead of being added to them.
 
