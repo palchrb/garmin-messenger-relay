@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -94,17 +95,33 @@ func (r *Relay) Run(ctx context.Context) error {
 		r.handleMessage(msg)
 	})
 
+	// Alert only if SignalR stays disconnected for 5 minutes — brief
+	// reconnects are normal and should not trigger email alerts.
+	var disconnectTimer *time.Timer
+	var disconnectMu sync.Mutex
+
 	r.sr.OnOpen(func() {
 		r.log.Info("SignalR connected")
+		disconnectMu.Lock()
+		if disconnectTimer != nil {
+			disconnectTimer.Stop()
+			disconnectTimer = nil
+		}
+		disconnectMu.Unlock()
 	})
 
 	r.sr.OnClose(func() {
 		r.log.Warn("SignalR disconnected — will reconnect automatically")
-		r.alerter.Send(AlertSignalRDisconnect,
-			"Garmin SignalR disconnected",
-			"The relay lost its connection to Garmin Messenger.\n"+
-				"It will attempt to reconnect automatically.\n\n"+
-				"If this persists, check the logs or run 'garmin-messenger-relay status'.")
+		disconnectMu.Lock()
+		if disconnectTimer == nil {
+			disconnectTimer = time.AfterFunc(5*time.Minute, func() {
+				r.alerter.Send(AlertSignalRDisconnect,
+					"Garmin SignalR disconnected for 5+ minutes",
+					"The relay has been unable to reconnect to Garmin Messenger for over 5 minutes.\n\n"+
+						"Check the logs or run 'garmin-messenger-relay status'.")
+			})
+		}
+		disconnectMu.Unlock()
 	})
 
 	r.sr.OnError(func(err error) {
