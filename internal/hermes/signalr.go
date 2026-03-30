@@ -131,19 +131,19 @@ func (sr *HermesSignalR) Start(ctx context.Context) error {
 // This mirrors the Python signalrcore approach: negotiate to get connectionId,
 // then open a WebSocket directly (ignoring the server's availableTransports list).
 func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Connection, error) {
-	sr.logger.Debug("SignalR connector: requesting access token")
+	sr.logger.Log(nil, LevelTrace, "SignalR connector: requesting access token")
 	token, err := sr.auth.AccessTokenFactory(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("getting access token: %w", err)
 	}
-	sr.logger.Debug("SignalR connector: token obtained", "length", len(token))
+	sr.logger.Log(nil, LevelTrace, "SignalR connector: token obtained", "length", len(token))
 
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+token)
 
 	// 1. Negotiate
 	negotiateURL := hubURL + "/negotiate"
-	sr.logger.Debug("SignalR connector: negotiate", "url", negotiateURL)
+	sr.logger.Log(nil, LevelTrace, "SignalR connector: negotiate", "url", negotiateURL)
 
 	negReq, err := http.NewRequestWithContext(ctx, "POST", negotiateURL, nil)
 	if err != nil {
@@ -158,7 +158,7 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	sr.logger.Debug("SignalR connector: negotiate response",
+	sr.logger.Log(nil, LevelTrace, "SignalR connector: negotiate response",
 		"status", resp.StatusCode, "body", truncate(string(body), 2000))
 
 	if resp.StatusCode != 200 {
@@ -179,7 +179,7 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 	// Standard SignalR: negotiate returns connectionId, connect back to same host.
 	var wsURL *url.URL
 	if negResp.URL != "" && negResp.AccessToken != "" {
-		sr.logger.Debug("SignalR connector: Azure redirect",
+		sr.logger.Log(nil, LevelTrace, "SignalR connector: Azure redirect",
 			"url", negResp.URL, "tokenLength", len(negResp.AccessToken))
 		wsURL, err = url.Parse(negResp.URL)
 		if err != nil {
@@ -188,7 +188,7 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 		// Use the Azure-issued token instead of our Hermes token
 		headers.Set("Authorization", "Bearer "+negResp.AccessToken)
 	} else {
-		sr.logger.Debug("SignalR connector: standard negotiate", "connectionId", negResp.ConnectionID)
+		sr.logger.Log(nil, LevelTrace, "SignalR connector: standard negotiate", "connectionId", negResp.ConnectionID)
 		wsURL, _ = url.Parse(hubURL)
 		q := wsURL.Query()
 		q.Set("id", negResp.ConnectionID)
@@ -206,12 +206,12 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 		connID = "azure"
 	}
 
-	sr.logger.Debug("SignalR connector: opening WebSocket", "url", wsURL.String())
+	sr.logger.Log(nil, LevelTrace, "SignalR connector: opening WebSocket", "url", wsURL.String())
 	conn, err := signalr.NewWebSocketConnection(ctx, wsURL, connID, headers)
 	if err != nil {
 		return nil, fmt.Errorf("WebSocket dial: %w", err)
 	}
-	sr.logger.Debug("SignalR connector: connected", "connectionId", conn.ConnectionID())
+	sr.logger.Log(nil, LevelTrace, "SignalR connector: connected", "connectionId", conn.ConnectionID())
 	return conn, nil
 }
 
@@ -287,7 +287,7 @@ type hermesReceiver struct {
 }
 
 func (r *hermesReceiver) ReceiveMessage(raw json.RawMessage) {
-	r.sr.logger.Debug("ReceiveMessage raw", "json", truncate(string(raw), 10000))
+	r.sr.logger.Log(nil, LevelTrace, "ReceiveMessage raw", "json", truncate(string(raw), 10000))
 	var msg MessageModel
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		r.sr.logger.Error("Error parsing ReceiveMessage", "error", err)
@@ -300,7 +300,7 @@ func (r *hermesReceiver) ReceiveMessage(raw json.RawMessage) {
 }
 
 func (r *hermesReceiver) ReceiveMessageUpdate(raw json.RawMessage) {
-	r.sr.logger.Debug("ReceiveMessageUpdate raw", "json", truncate(string(raw), 10000))
+	r.sr.logger.Log(nil, LevelTrace, "ReceiveMessageUpdate raw", "json", truncate(string(raw), 10000))
 	var update MessageStatusUpdate
 	if err := json.Unmarshal(raw, &update); err != nil {
 		r.sr.logger.Error("Error parsing ReceiveMessageUpdate", "error", err)
@@ -313,7 +313,7 @@ func (r *hermesReceiver) ReceiveMessageUpdate(raw json.RawMessage) {
 }
 
 func (r *hermesReceiver) ReceiveConversationMuteStatusUpdate(raw json.RawMessage) {
-	r.sr.logger.Debug("ReceiveConversationMuteStatusUpdate raw", "json", truncate(string(raw), 10000))
+	r.sr.logger.Log(nil, LevelTrace, "ReceiveConversationMuteStatusUpdate raw", "json", truncate(string(raw), 10000))
 	var update ConversationMuteStatusUpdate
 	if err := json.Unmarshal(raw, &update); err != nil {
 		r.sr.logger.Error("Error parsing ReceiveConversationMuteStatusUpdate", "error", err)
@@ -325,7 +325,7 @@ func (r *hermesReceiver) ReceiveConversationMuteStatusUpdate(raw json.RawMessage
 }
 
 func (r *hermesReceiver) ReceiveUserBlockStatusUpdate(raw json.RawMessage) {
-	r.sr.logger.Debug("ReceiveUserBlockStatusUpdate raw", "json", truncate(string(raw), 10000))
+	r.sr.logger.Log(nil, LevelTrace, "ReceiveUserBlockStatusUpdate raw", "json", truncate(string(raw), 10000))
 	var update UserBlockStatusUpdate
 	if err := json.Unmarshal(raw, &update); err != nil {
 		r.sr.logger.Error("Error parsing ReceiveUserBlockStatusUpdate", "error", err)
@@ -337,7 +337,7 @@ func (r *hermesReceiver) ReceiveUserBlockStatusUpdate(raw json.RawMessage) {
 }
 
 func (r *hermesReceiver) ReceiveServerNotification(raw json.RawMessage) {
-	r.sr.logger.Debug("ReceiveServerNotification raw", "json", truncate(string(raw), 10000))
+	r.sr.logger.Log(nil, LevelTrace, "ReceiveServerNotification raw", "json", truncate(string(raw), 10000))
 	var notif ServerNotification
 	if err := json.Unmarshal(raw, &notif); err != nil {
 		r.sr.logger.Error("Error parsing ReceiveServerNotification", "error", err)
@@ -354,7 +354,7 @@ func (r *hermesReceiver) ReceiveServerNotification(raw json.RawMessage) {
 // to) the regular ReceiveMessage handler. The payload uses the same MessageModel
 // shape but with messageType="Reaction" and parentMessageId set.
 func (r *hermesReceiver) ReceiveReaction(raw json.RawMessage) {
-	r.sr.logger.Debug("ReceiveReaction raw", "json", truncate(string(raw), 10000))
+	r.sr.logger.Log(nil, LevelTrace, "ReceiveReaction raw", "json", truncate(string(raw), 10000))
 	var msg MessageModel
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		r.sr.logger.Error("Error parsing ReceiveReaction", "error", err)

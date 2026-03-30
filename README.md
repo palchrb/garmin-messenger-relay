@@ -192,7 +192,7 @@ forwarding:
   forward_location: true       # Forward GPS location and map links.
 
 log:
-  level: "info"                # Log level: debug, info, warn, error.
+  level: "info"                # Log level: trace, debug, info, warn, error.
   pretty: true                 # Human-readable logs (false for JSON).
 ```
 

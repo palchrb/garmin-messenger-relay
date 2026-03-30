@@ -110,6 +110,8 @@ func setupLogger(cfg *relay.Config) {
 	// Configure slog (used by relay internals) to the same level.
 	var slogLevel slog.Level
 	switch cfg.Log.Level {
+	case "trace":
+		slogLevel = slog.Level(-8) // LevelTrace: verbose HTTP request/response details
 	case "debug":
 		slogLevel = slog.LevelDebug
 	case "warn":
