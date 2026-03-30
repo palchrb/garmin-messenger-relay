@@ -95,7 +95,7 @@ func (sr *HermesSignalR) Start(ctx context.Context) error {
 			return sr.connect(ctx, hubURL)
 		}),
 		signalr.WithReceiver(receiver),
-		signalr.Logger(&slogAdapter{logger: sr.logger}, true),
+		signalr.Logger(&slogAdapter{logger: sr.logger}, false),
 		signalr.KeepAliveInterval(15*time.Second),
 		signalr.TimeoutInterval(30*time.Second),
 	)
