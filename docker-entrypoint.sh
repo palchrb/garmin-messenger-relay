@@ -5,7 +5,7 @@ set -e
 # This allows: docker run ... login -config /data/config.yaml
 # instead of:  docker run ... garmin-messenger-relay login -config /data/config.yaml
 case "$1" in
-    run|login|logout|status|test-smtp|init|version|help|-*)
+    run|login|logout|status|health|test-smtp|init|version|help|-*)
         set -- garmin-messenger-relay "$@"
         ;;
 esac

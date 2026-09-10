@@ -68,7 +68,7 @@ func (m *mcsClient) connect(ctx context.Context) error {
 	go func() {
 		select {
 		case <-ctx.Done():
-			m.conn.Close()
+			_ = m.conn.Close()
 		case <-connClosed:
 		}
 	}()

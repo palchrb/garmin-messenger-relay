@@ -164,7 +164,7 @@ func TestFCMRegisterAndroidNative(t *testing.T) {
 		assert.NotEmpty(t, r.PostForm.Get("X-osv"))
 		assert.NotEmpty(t, r.PostForm.Get("X-gmsv"))
 		assert.NotEmpty(t, r.PostForm.Get("X-cliv"))
-		fmt.Fprint(w, "token=mock-fcm-token-android")
+		_, _ = fmt.Fprint(w, "token=mock-fcm-token-android")
 	}))
 	defer registerServer.Close()
 

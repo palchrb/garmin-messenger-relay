@@ -338,19 +338,19 @@ type ConversationMuteDetailModel struct {
 // UserLocation and ReferencePoint serialize as explicit null when nil
 // (server rejects requests with those fields missing entirely).
 type SendMessageRequest struct {
-	To              []string           `json:"to"`
-	MessageBody     string             `json:"messageBody"`
-	UserLocation    *UserLocation      `json:"userLocation"`
-	ReferencePoint  *UserLocation      `json:"referencePoint"`
-	MessageType     *HermesMessageType `json:"messageType"`
-	IsPost          bool               `json:"isPost"`
-	MediaID         *uuid.UUID         `json:"mediaId"`
-	MediaType       *MediaType         `json:"mediaType"`
-	MediaMetadata   *MediaMetadata     `json:"mediaMetadata,omitempty"`
-	UUID            *uuid.UUID         `json:"uuid"`
-	OtaUuid         *uuid.UUID         `json:"otaUuid"`
+	To             []string           `json:"to"`
+	MessageBody    string             `json:"messageBody"`
+	UserLocation   *UserLocation      `json:"userLocation"`
+	ReferencePoint *UserLocation      `json:"referencePoint"`
+	MessageType    *HermesMessageType `json:"messageType"`
+	IsPost         bool               `json:"isPost"`
+	MediaID        *uuid.UUID         `json:"mediaId"`
+	MediaType      *MediaType         `json:"mediaType"`
+	MediaMetadata  *MediaMetadata     `json:"mediaMetadata,omitempty"`
+	UUID           *uuid.UUID         `json:"uuid"`
+	OtaUuid        *uuid.UUID         `json:"otaUuid"`
 	// ParentMessageID is set when sending a reaction to identify the target message.
-	ParentMessageID *uuid.UUID         `json:"parentMessageId,omitempty"`
+	ParentMessageID *uuid.UUID `json:"parentMessageId,omitempty"`
 }
 
 // SendMessageV2Response is the response from POST Message/Send v2.
@@ -569,4 +569,35 @@ type UserBlockStatusUpdate struct {
 type ServerNotification struct {
 	NotificationType *string `json:"notificationType,omitempty"`
 	Message          *string `json:"message,omitempty"`
+}
+
+// ToMessageModel converts a message from a conversation detail response into
+// the MessageModel shape used by the SignalR path, so that catch-up and live
+// messages can be processed identically. conversationID is taken from the
+// enclosing ConversationDetailModel.MetaData.
+func (m ConversationMessageModel) ToMessageModel(conversationID uuid.UUID) MessageModel {
+	return MessageModel{
+		MessageID:        m.MessageID,
+		ConversationID:   conversationID,
+		ParentMessageID:  m.ParentMessageID,
+		MessageBody:      m.MessageBody,
+		From:             m.From,
+		SentAt:           m.SentAt,
+		ReceivedAt:       m.ReceivedAt,
+		Status:           m.Status,
+		UserLocation:     m.UserLocation,
+		ReferencePoint:   m.ReferencePoint,
+		MessageType:      m.MessageType,
+		MapShareUrl:      m.MapShareUrl,
+		MapSharePassword: m.MapSharePassword,
+		LiveTrackUrl:     m.LiveTrackUrl,
+		FromDeviceType:   m.FromDeviceType,
+		MediaID:          m.MediaID,
+		MediaType:        m.MediaType,
+		UUID:             m.UUID,
+		Transcription:    m.Transcription,
+		OtaUuid:          m.OtaUuid,
+		FromUnitID:       m.FromUnitID,
+		IntendedUnitID:   m.IntendedUnitID,
+	}
 }

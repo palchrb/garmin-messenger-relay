@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -472,4 +473,34 @@ func TestAPIError_Error(t *testing.T) {
 	assert.Contains(t, err.Error(), "GET")
 	assert.Contains(t, err.Error(), "401")
 	assert.Contains(t, err.Error(), "invalid token")
+}
+
+func TestMaskSecrets(t *testing.T) {
+	in := `{"accessToken":"abc.def","refreshToken": "r-1","instanceId":"i1","expiresIn":3600,"access_token":"x"}`
+	got := maskSecrets(in)
+	for _, leaked := range []string{"abc.def", "r-1", `"x"`} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("secret %q leaked in %q", leaked, got)
+		}
+	}
+	if !strings.Contains(got, `"instanceId":"i1"`) || !strings.Contains(got, `"expiresIn":3600`) {
+		t.Fatalf("non-secret fields altered: %q", got)
+	}
+	if strings.Count(got, "[REDACTED]") != 3 {
+		t.Fatalf("expected 3 redactions, got %q", got)
+	}
+
+	// Truncated body: must not panic and must still redact.
+	if got := maskSecrets(`{"refreshToken":"abc`); strings.Contains(got, "abc") {
+		t.Fatalf("truncated secret leaked: %q", got)
+	}
+}
+
+func TestMaskHeaderValue(t *testing.T) {
+	if got := maskHeaderValue("Authorization", "Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"); strings.Contains(got, "payload") {
+		t.Fatalf("token leaked: %q", got)
+	}
+	if got := maskHeaderValue("Content-Type", "application/json"); got != "application/json" {
+		t.Fatalf("plain header altered: %q", got)
+	}
 }

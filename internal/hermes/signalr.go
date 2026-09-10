@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/google/uuid"
 	"github.com/philippseith/signalr"
 )
@@ -63,20 +64,78 @@ func NewHermesSignalR(auth *HermesAuth, opts ...HermesSignalROption) *HermesSign
 
 // Handler registration
 
-func (sr *HermesSignalR) OnMessage(handler func(MessageModel))                      { sr.onMessage = handler }
-func (sr *HermesSignalR) OnStatusUpdate(handler func(MessageStatusUpdate))           { sr.onStatusUpdate = handler }
-func (sr *HermesSignalR) OnMuteUpdate(handler func(ConversationMuteStatusUpdate))    { sr.onMuteUpdate = handler }
-func (sr *HermesSignalR) OnBlockUpdate(handler func(UserBlockStatusUpdate))          { sr.onBlockUpdate = handler }
-func (sr *HermesSignalR) OnNotification(handler func(ServerNotification))            { sr.onNotification = handler }
-func (sr *HermesSignalR) OnNonconversationalMessage(handler func(string))            { sr.onNonconversationalMessage = handler }
-func (sr *HermesSignalR) OnReaction(handler func(MessageModel))                      { sr.onReaction = handler }
-func (sr *HermesSignalR) OnOpen(handler func())                                      { sr.onOpen = handler }
-func (sr *HermesSignalR) OnClose(handler func())                                     { sr.onClose = handler }
-func (sr *HermesSignalR) OnError(handler func(error))                                { sr.onError = handler }
+func (sr *HermesSignalR) OnMessage(handler func(MessageModel)) { sr.onMessage = handler }
+func (sr *HermesSignalR) OnStatusUpdate(handler func(MessageStatusUpdate)) {
+	sr.onStatusUpdate = handler
+}
+func (sr *HermesSignalR) OnMuteUpdate(handler func(ConversationMuteStatusUpdate)) {
+	sr.onMuteUpdate = handler
+}
+func (sr *HermesSignalR) OnBlockUpdate(handler func(UserBlockStatusUpdate)) {
+	sr.onBlockUpdate = handler
+}
+func (sr *HermesSignalR) OnNotification(handler func(ServerNotification)) {
+	sr.onNotification = handler
+}
+func (sr *HermesSignalR) OnNonconversationalMessage(handler func(string)) {
+	sr.onNonconversationalMessage = handler
+}
+func (sr *HermesSignalR) OnReaction(handler func(MessageModel)) { sr.onReaction = handler }
+func (sr *HermesSignalR) OnOpen(handler func())                 { sr.onOpen = handler }
+func (sr *HermesSignalR) OnClose(handler func())                { sr.onClose = handler }
+func (sr *HermesSignalR) OnError(handler func(error))           { sr.onError = handler }
 
-// Start builds and starts the SignalR connection. It blocks until ctx is
-// cancelled or the connection is permanently lost, ensuring the caller stays
-// alive for the lifetime of the connection.
+// initialConnectTimeout bounds how long Start waits for the first
+// successful connection before giving up so that misconfiguration fails fast.
+const initialConnectTimeout = 30 * time.Second
+
+// newReconnectBackoff returns the backoff policy for reconnects. The
+// library's default gives up after 15 minutes, which would leave the relay
+// alive but permanently disconnected; we never give up and let the
+// supervisor decide when to restart the process.
+func newReconnectBackoff() backoff.BackOff {
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = 1 * time.Second
+	b.MaxInterval = 60 * time.Second
+	b.MaxElapsedTime = 0
+	return b
+}
+
+// stateEvent describes the callback to run for a client state transition.
+type stateEvent int
+
+const (
+	eventNone stateEvent = iota
+	eventOpen
+	eventClose
+	eventClosed
+)
+
+// classifyTransition maps a state transition to the relay-level event that
+// should be raised. It is pure so it can be unit-tested.
+func classifyTransition(prev, cur signalr.ClientState) stateEvent {
+	if prev == cur {
+		return eventNone
+	}
+	switch cur {
+	case signalr.ClientConnected:
+		return eventOpen
+	case signalr.ClientClosed:
+		return eventClosed
+	case signalr.ClientConnecting:
+		if prev == signalr.ClientConnected {
+			return eventClose
+		}
+	}
+	return eventNone
+}
+
+// Start builds and starts the SignalR connection and blocks until ctx is
+// cancelled. Reconnects are handled by the library with an unbounded backoff;
+// OnOpen fires on every (re)connect and OnClose whenever an established
+// connection is lost. If the client closes permanently while ctx is still
+// live (server refused reconnection), Start returns an error so the process
+// can exit and be restarted by its supervisor.
 func (sr *HermesSignalR) Start(ctx context.Context) error {
 	sr.mu.Lock()
 	sr.stopped = false
@@ -95,6 +154,7 @@ func (sr *HermesSignalR) Start(ctx context.Context) error {
 			return sr.connect(ctx, hubURL)
 		}),
 		signalr.WithReceiver(receiver),
+		signalr.WithBackoff(newReconnectBackoff),
 		signalr.Logger(&slogAdapter{logger: sr.logger}, false),
 		signalr.KeepAliveInterval(15*time.Second),
 		signalr.TimeoutInterval(30*time.Second),
@@ -104,27 +164,71 @@ func (sr *HermesSignalR) Start(ctx context.Context) error {
 		return fmt.Errorf("creating SignalR client: %w", err)
 	}
 
+	sr.mu.Lock()
 	sr.client = client
+	sr.mu.Unlock()
 
-	// Start is non-blocking — wait for actual connection.
+	// The library notifies observers from goroutines that hold the client
+	// mutex while sending, so this channel must be drained promptly for the
+	// whole client lifetime and the callbacks below must never block.
+	stateCh := make(chan signalr.ClientState, 16)
+	cancelObserve := client.ObserveStateChanged(stateCh)
+	// ctx must be cancelled before the observation is removed, otherwise a
+	// notifier blocked on the channel would deadlock with cancelObserve.
+	defer func() {
+		cancel()
+		cancelObserve()
+	}()
+
 	client.Start()
 
-	waitCtx, waitCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer waitCancel()
-	if err := <-client.WaitForState(waitCtx, signalr.ClientConnected); err != nil {
-		cancel()
-		return fmt.Errorf("waiting for SignalR connection: %w", err)
-	}
+	initial := time.NewTimer(initialConnectTimeout)
+	defer initial.Stop()
+	connectedOnce := false
+	prev := signalr.ClientCreated
 
-	sr.logger.Debug("SignalR connected")
-	if sr.onOpen != nil {
-		sr.onOpen()
-	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
 
-	// Block until the context is cancelled. The SignalR library handles
-	// reconnection internally; we just need to keep the caller alive.
-	<-ctx.Done()
-	return nil
+		case <-initial.C:
+			if !connectedOnce {
+				return fmt.Errorf("waiting for SignalR connection: %w", errOrTimeout(client.Err()))
+			}
+
+		case <-stateCh:
+			// Notifications may arrive out of order; always read the live state.
+			cur := client.State()
+			ev := classifyTransition(prev, cur)
+			prev = cur
+			switch ev {
+			case eventOpen:
+				connectedOnce = true
+				sr.logger.Debug("SignalR connected")
+				if sr.onOpen != nil {
+					sr.onOpen()
+				}
+			case eventClose:
+				sr.logger.Warn("SignalR connection lost, reconnecting", "error", client.Err())
+				if sr.onClose != nil {
+					sr.onClose()
+				}
+			case eventClosed:
+				if ctx.Err() != nil {
+					return nil
+				}
+				return fmt.Errorf("SignalR client closed permanently: %w", errOrTimeout(client.Err()))
+			}
+		}
+	}
+}
+
+func errOrTimeout(err error) error {
+	if err == nil {
+		return fmt.Errorf("no connection within %s", initialConnectTimeout)
+	}
+	return err
 }
 
 // connect performs SignalR negotiate and creates a WebSocket connection.
@@ -134,6 +238,9 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 	sr.logger.Log(context.TODO(), LevelTrace, "SignalR connector: requesting access token")
 	token, err := sr.auth.AccessTokenFactory(ctx)
 	if err != nil {
+		if sr.onError != nil {
+			sr.onError(fmt.Errorf("getting access token: %w", err))
+		}
 		return nil, fmt.Errorf("getting access token: %w", err)
 	}
 	sr.logger.Log(context.TODO(), LevelTrace, "SignalR connector: token obtained", "length", len(token))
@@ -145,24 +252,30 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 	negotiateURL := hubURL + "/negotiate"
 	sr.logger.Log(context.TODO(), LevelTrace, "SignalR connector: negotiate", "url", negotiateURL)
 
-	negReq, err := http.NewRequestWithContext(ctx, "POST", negotiateURL, nil)
+	negCtx, negCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer negCancel()
+	negReq, err := http.NewRequestWithContext(negCtx, "POST", negotiateURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating negotiate request: %w", err)
 	}
 	negReq.Header = headers.Clone()
 
-	resp, err := http.DefaultClient.Do(negReq)
+	resp, err := sr.httpClient().Do(negReq)
 	if err != nil {
 		return nil, fmt.Errorf("negotiate request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	sr.logger.Log(context.TODO(), LevelTrace, "SignalR connector: negotiate response",
-		"status", resp.StatusCode, "body", truncate(string(body), 2000))
+		"status", resp.StatusCode, "body", truncate(maskSecrets(string(body)), 2000))
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("negotiate failed: %s %s", resp.Status, truncate(string(body), 500))
+		err := &APIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: truncate(string(body), 500), URL: negotiateURL, Method: "POST"}
+		if sr.onError != nil {
+			sr.onError(fmt.Errorf("negotiate failed: %w", err))
+		}
+		return nil, fmt.Errorf("negotiate failed: %w", err)
 	}
 
 	var negResp struct {
@@ -195,9 +308,10 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 		wsURL.RawQuery = q.Encode()
 	}
 
-	if wsURL.Scheme == "https" {
+	switch wsURL.Scheme {
+	case "https":
 		wsURL.Scheme = "wss"
-	} else if wsURL.Scheme == "http" {
+	case "http":
 		wsURL.Scheme = "ws"
 	}
 
@@ -224,28 +338,49 @@ func (sr *HermesSignalR) Stop() {
 	if sr.cancel != nil {
 		sr.cancel()
 	}
+	sr.logger.Debug("SignalR stopped")
+}
 
-	sr.logger.Debug("SignalR disconnected")
-	if sr.onClose != nil {
-		sr.onClose()
+// httpClient returns the HTTP client used for negotiate requests.
+func (sr *HermesSignalR) httpClient() *http.Client {
+	if sr.auth != nil && sr.auth.httpClient != nil {
+		return sr.auth.httpClient
 	}
+	return &http.Client{Timeout: 30 * time.Second}
+}
+
+// currentClient returns the underlying client under lock.
+func (sr *HermesSignalR) currentClient() signalr.Client {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	return sr.client
 }
 
 // Client-to-server invocations
 
 // MarkAsDelivered invokes MarkAsDelivered on the server.
 func (sr *HermesSignalR) MarkAsDelivered(conversationID, messageID uuid.UUID) {
-	if sr.client != nil {
+	if client := sr.currentClient(); client != nil {
 		sr.logger.Debug("SignalR Send", "method", "MarkAsDelivered", "conversationId", conversationID, "messageId", messageID)
-		sr.client.Send("MarkAsDelivered", conversationID.String(), messageID.String())
+		sr.logSendResult("MarkAsDelivered", client.Send("MarkAsDelivered", conversationID.String(), messageID.String()))
 	}
+}
+
+// logSendResult reports a failed fire-and-forget Send without blocking the
+// caller.
+func (sr *HermesSignalR) logSendResult(method string, errCh <-chan error) {
+	go func() {
+		if err := <-errCh; err != nil {
+			sr.logger.Warn("SignalR Send failed", "method", method, "error", err)
+		}
+	}()
 }
 
 // MarkAsRead invokes MarkAsRead on the server.
 func (sr *HermesSignalR) MarkAsRead(conversationID, messageID uuid.UUID) {
-	if sr.client != nil {
+	if client := sr.currentClient(); client != nil {
 		sr.logger.Debug("SignalR Send", "method", "MarkAsRead", "conversationId", conversationID, "messageId", messageID)
-		sr.client.Send("MarkAsRead", conversationID.String(), messageID.String())
+		sr.logSendResult("MarkAsRead", client.Send("MarkAsRead", conversationID.String(), messageID.String()))
 	}
 }
 
@@ -253,9 +388,9 @@ func (sr *HermesSignalR) MarkAsRead(conversationID, messageID uuid.UUID) {
 // and returns a channel that will receive the result.
 func (sr *HermesSignalR) QueryNetworkProperties() <-chan *NetworkPropertiesResponse {
 	ch := make(chan *NetworkPropertiesResponse, 1)
-	if sr.client != nil {
+	if client := sr.currentClient(); client != nil {
 		sr.logger.Debug("SignalR Invoke", "method", "NetworkProperties")
-		result := <-sr.client.Invoke("NetworkProperties")
+		result := <-client.Invoke("NetworkProperties")
 		if result.Error != nil {
 			sr.logger.Error("NetworkProperties invocation error", "error", result.Error)
 			close(ch)
@@ -402,14 +537,25 @@ func (a *slogAdapter) Log(keyVals ...interface{}) error {
 	}
 	// go-kit/log: all elements are key-value pairs.
 	// Skip keys slog already manages (level, ts, caller).
+	// Only the library's info logger is enabled (debug is off), so what
+	// arrives here includes every reconnect failure and must be visible at
+	// the default log level.
 	var attrs []any
+	hasError := false
 	for i := 0; i+1 < len(keyVals); i += 2 {
 		key := fmt.Sprint(keyVals[i])
 		if key == "level" || key == "ts" || key == "caller" {
 			continue
 		}
+		if key == "error" || key == "connect" {
+			hasError = true
+		}
 		attrs = append(attrs, key, keyVals[i+1])
 	}
-	a.logger.Debug("signalr", attrs...)
+	if hasError {
+		a.logger.Warn("signalr", attrs...)
+	} else {
+		a.logger.Info("signalr", attrs...)
+	}
 	return nil
 }

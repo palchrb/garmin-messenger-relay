@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"testing"
+	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/google/uuid"
+	"github.com/philippseith/signalr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -157,4 +160,35 @@ func TestSlogAdapter(t *testing.T) {
 		_ = adapter.Log("test message", "key", "value")
 		_ = adapter.Log()
 	})
+}
+
+func TestClassifyTransition(t *testing.T) {
+	cases := []struct {
+		prev, cur signalr.ClientState
+		want      stateEvent
+	}{
+		{signalr.ClientCreated, signalr.ClientConnecting, eventNone},
+		{signalr.ClientConnecting, signalr.ClientConnected, eventOpen},
+		{signalr.ClientConnected, signalr.ClientConnecting, eventClose},
+		{signalr.ClientConnecting, signalr.ClientConnecting, eventNone},
+		{signalr.ClientConnected, signalr.ClientConnected, eventNone},
+		{signalr.ClientConnecting, signalr.ClientClosed, eventClosed},
+		{signalr.ClientConnected, signalr.ClientClosed, eventClosed},
+	}
+	for _, c := range cases {
+		if got := classifyTransition(c.prev, c.cur); got != c.want {
+			t.Errorf("classifyTransition(%v, %v) = %v, want %v", c.prev, c.cur, got, c.want)
+		}
+	}
+}
+
+func TestReconnectBackoffNeverStops(t *testing.T) {
+	b := newReconnectBackoff()
+	for i := 0; i < 50; i++ {
+		if d := b.NextBackOff(); d == backoff.Stop {
+			t.Fatalf("backoff gave up after %d attempts", i)
+		} else if d > 90*time.Second { // MaxInterval plus randomisation
+			t.Fatalf("backoff interval %v exceeds cap", d)
+		}
+	}
 }

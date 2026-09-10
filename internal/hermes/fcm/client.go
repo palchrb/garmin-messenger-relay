@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/palchrb/garmin-messenger-relay/internal/atomicfile"
 	gm "github.com/palchrb/garmin-messenger-relay/internal/hermes"
 	"github.com/palchrb/garmin-messenger-relay/internal/hermes/internal/mcspb"
 )
@@ -446,14 +447,14 @@ func (c *Client) saveCredentials() error {
 	if c.credentials == nil {
 		return fmt.Errorf("no credentials to save")
 	}
-	if err := os.MkdirAll(filepath.Dir(c.credentialsPath()), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(c.credentialsPath()), 0o700); err != nil {
 		return fmt.Errorf("creating session directory: %w", err)
 	}
 	data, err := json.MarshalIndent(c.credentials, "", "  ")
 	if err != nil {
 		return fmt.Errorf("serializing FCM credentials: %w", err)
 	}
-	if err := os.WriteFile(c.credentialsPath(), data, 0o600); err != nil {
+	if err := atomicfile.WriteFile(c.credentialsPath(), data, 0o600); err != nil {
 		return fmt.Errorf("writing FCM credentials: %w", err)
 	}
 	c.logger.Debug("Saved FCM credentials", "path", c.credentialsPath())
@@ -499,7 +500,7 @@ func (t *loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	}
 	if req.Body != nil && req.Body != http.NoBody {
 		bodyBytes, err := io.ReadAll(req.Body)
-		req.Body.Close()
+		_ = req.Body.Close()
 		if err == nil {
 			t.logger.Log(context.TODO(), levelTrace, "  Request body", "length", len(bodyBytes), "data", truncate(string(bodyBytes), 2000))
 			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -519,7 +520,7 @@ func (t *loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 		t.logger.Log(context.TODO(), levelTrace, "  Response header", "key", k, "value", strings.Join(v, ", "))
 	}
 	respBody, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if readErr == nil {
 		t.logger.Log(context.TODO(), levelTrace, "  Response body", "length", len(respBody), "data", truncate(string(respBody), 2000))
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))

@@ -10,6 +10,9 @@ Not affiliated with garmin in any way. Forward messages from Garmin Messenger (i
 - Transcodes email attachments to Garmin-native formats (images to AVIF, audio to OGG Opus via ffmpeg)
 - Caption-based routing: include email addresses in a media caption to route to specific recipients
 - Reply validation: only legitimate replies to messages sent by the relay are forwarded back
+- Catches up on messages that arrived while the relay was offline, and never forwards the same message twice
+- Retries failed deliveries, emails the replier when a reply cannot be delivered, and can alert you by email on outages
+- Health check command for Docker/systemd, so a hung or disconnected relay is noticed
 - Runs as a single binary or Docker container (multi-arch: amd64 + arm64)
 
 ## Quick start
@@ -54,46 +57,97 @@ Create a directory for your data and add your config (see [Configuration](#confi
 mkdir -p garmin-relay-data
 
 cat > garmin-relay-data/config.yaml << 'EOF'
+# garmin-messenger-relay configuration
+# Run "garmin-messenger-relay login" to authenticate after editing this file.
+#
+# Secrets can be kept out of this file by setting the environment variables
+# GMR_SMTP_PASSWORD and GMR_IMAP_PASSWORD instead.
+
 garmin:
-  phone: "+4712345678"          # Required. E.164 phone number for Garmin Messenger.
-  session_dir: "./sessions"     # Where session tokens are stored.
+  # E.164 phone number registered with the Garmin Messenger app.
+  phone: "+4712345678"
+  # Directory where the Garmin session token and relay state are stored.
+  # Relative paths are resolved next to this config file.
+  session_dir: "./sessions"
 
 smtp:
-  host: "smtp.gmail.com"       # Required. SMTP server hostname.
-  port: 587                    # SMTP port (587 for STARTTLS, 465 for SSL, 25 for plain).
-  username: "you@gmail.com"    # SMTP username.
-  password: "your-app-password" # SMTP password. For Gmail, use an App Password.
-  from: "Garmin Relay <you@gmail.com>" # Required. Sender address shown in forwarded emails.
-  tls: "starttls"              # Connection security: "starttls", "ssl", or "none".
+  host: "smtp.gmail.com"
+  port: 587
+  username: "you@gmail.com"
+  # For Gmail: use an App Password (https://myaccount.google.com/apppasswords).
+  password: "your-app-password"
+  from: "Garmin Forwarder <you@gmail.com>"
+  # tls: starttls | ssl | none. With starttls the relay refuses to send if the
+  # server does not offer encryption.
+  tls: "starttls"
 
-# IMAP is optional. Enable it for two-way messaging (receive email replies
-# and send them back to Garmin). Without IMAP, the relay is one-way only.
+# IMAP settings for receiving replies (optional but recommended for two-way messaging).
+# Remove or leave host empty to run one-way (Garmin -> email only).
+#
+# The relay only touches emails that are replies to messages it sent itself;
+# other mail in the inbox is left untouched and unread.
 imap:
-  host: "imap.gmail.com"       # IMAP server hostname. Leave empty to disable.
-  port: 993                    # IMAP port (993 for TLS).
+  host: "imap.gmail.com"
+  port: 993
   username: "you@gmail.com"
   password: "your-app-password"
-  reply_window_days: 7         # Ignore replies to messages older than this.
-  max_attachment_mb: 5         # Maximum size per email attachment in MB.
+  reply_window_days: 7     # ignore replies to relay emails older than this
+  max_attachment_mb: 5     # reject inbound attachments larger than this
+  # Only accept replies your mail provider has verified (DKIM/DMARC pass).
+  # Recommended when the reply address is not under your control.
+  require_authenticated_replies: false
 
 forwarding:
-  default_recipients:          # Required. Emails that receive all Garmin messages.
+  # All incoming messages are forwarded to these addresses.
+  default_recipients:
     - "you@example.com"
-  caption_routing: true        # Parse email addresses from media captions.
-  caption_routing_replaces_default: false  # If true, caption addresses replace defaults.
-  forward_text: true           # Forward text messages.
-  forward_media: true          # Forward media attachments (images, audio).
-  forward_location: true       # Forward GPS location and map links.
+
+  # Only forward messages from these phone numbers (E.164). Anyone who knows
+  # your Garmin number can message it, so restrict this if the relay should
+  # only serve your own devices. Empty = forward from anyone.
+  allowed_senders: []
+  #  - "+4712345678"
+
+  # Names shown in emails instead of raw phone numbers.
+  contacts: {}
+  #  "+4712345678": "Ola"
+
+  # If true, email addresses found in a media caption are also used as recipients.
+  # Example: send a photo with caption "check this out admin@example.com" to route
+  # that specific message to admin@example.com in addition to default_recipients.
+  # Anyone allowed to send to the relay can make it email these addresses, so
+  # combine with allowed_senders and/or caption_routing_allowlist.
+  caption_routing: false
+
+  # Restrict caption routing to these addresses or domains. Empty = any address.
+  caption_routing_allowlist: []
+  #  - "@example.com"
+  #  - "friend@other.com"
+
+  # If true, caption-parsed addresses REPLACE default_recipients for that message.
+  # If false (default), caption addresses are ADDED to default_recipients.
+  caption_routing_replaces_default: false
+
+  # Control which message types are forwarded.
+  forward_text: true
+  forward_media: true
+  forward_location: true
+
+  # How often (minutes) to poll Garmin for messages missed while offline, in
+  # addition to the check done on every reconnect. 0 disables polling.
+  catchup_interval_minutes: 10
 
 log:
-  level: "info"                # Log level: trace, debug, info, warn, error.
-  pretty: true                 # Human-readable logs (false for JSON).
+  # level: trace | debug | info | warn | error
+  level: "info"
+  # pretty: true for human-readable output, false for JSON (better for log aggregators).
+  pretty: true
 
-# Optional: email alerts for operational issues (Garmin disconnect, IMAP auth
-# failure, session expiry). Leave empty or omit to disable.
+# Optional: receive email alerts when something goes wrong (Garmin disconnected,
+# IMAP auth failure, session expired). Leave empty to disable.
 # alerts:
 #   email: "admin@example.com"
-#   cooldown_minutes: 30       # Minimum minutes between repeated alerts.
+#   cooldown_minutes: 30
 EOF
 ```
 
@@ -155,7 +209,28 @@ docker compose logs -f garmin-relay
 
 ## Configuration
 
-Copy `config.example.yaml` to `config.yaml` and edit it. The full config with all options and defaults is shown in the [Docker setup](#setup) above.
+Copy `config.example.yaml` to `config.yaml` and edit it. The full config with all options and defaults is shown in the [Docker setup](#setup) above. Unknown keys are rejected at startup so typos are caught early, and `garmin-messenger-relay status` validates the file and tests every connection.
+
+### Keeping passwords out of the config file
+
+Set these environment variables instead of writing passwords into `config.yaml`. They override the file when set:
+
+| Variable | Overrides |
+|----------|-----------|
+| `GMR_SMTP_PASSWORD` | `smtp.password` |
+| `GMR_IMAP_PASSWORD` | `imap.password` |
+| `GMR_CONFIG` | config file path (same as `-config`) |
+
+`init` writes `config.yaml` readable only by the owner. If you edit it by hand, keep it that way.
+
+### Restricting who can use the relay
+
+Anyone who knows the Garmin number can message it, and by default every message is forwarded. Two settings limit that:
+
+- `forwarding.allowed_senders`: only forward messages from these phone numbers. Recommended when the relay serves your own devices.
+- `forwarding.caption_routing_allowlist`: only let caption routing deliver to these addresses or `@domains`. Without it, anyone allowed to send can make the relay email arbitrary addresses from your account, which is why `caption_routing` is off by default.
+
+For the reply direction, `imap.require_authenticated_replies: true` drops replies your mail provider could not verify with DKIM or DMARC, which defeats forged `From` headers. Replies that fail DMARC are always dropped.
 
 ### Gmail setup
 
@@ -172,6 +247,8 @@ Example: Send a photo from your inReach with caption `"admin@example.com, boss@w
 
 Set `caption_routing_replaces_default: true` if you want caption addresses to **replace** the default recipients instead of being added to them.
 
+Each recipient gets their own email with its own `Message-ID`, so recipients never see each other's addresses and replies are matched to the right person.
+
 ## Commands
 
 | Command | Description |
@@ -180,7 +257,8 @@ Set `caption_routing_replaces_default: true` if you want caption addresses to **
 | `login` | Authenticate with Garmin Messenger via SMS OTP (one-time) |
 | `logout` | Remove saved Garmin session |
 | `run` | Start the relay (default if no command given) |
-| `status` | Check Garmin session validity and SMTP connectivity |
+| `status` | Validate config, check Garmin session, SMTP and IMAP connectivity, and report whether a running relay is connected |
+| `health` | Exit 0 if a running relay reported itself connected within the last 3 minutes (no network calls; used by the Docker `HEALTHCHECK`) |
 | `test-smtp` | Send a test email to verify SMTP settings |
 | `version` | Print version, commit hash, and build time |
 
@@ -196,17 +274,18 @@ Garmin inReach  ──SignalR──>  garmin-messenger-relay  ──SMTP──> 
 ### Garmin to email
 
 1. Messages arrive in real-time via SignalR WebSocket from Garmin Hermes
-2. The relay formats each message as a plain-text email with sender, caption, GPS coordinates, OpenStreetMap link, altitude, and attachment info
-3. Media attachments (AVIF images, OGG audio) are included as-is
-4. The email is sent via SMTP to configured recipients
+2. On every (re)connect, and every `catchup_interval_minutes`, the relay also asks Garmin for conversations updated since its last successful pass and picks up anything it has not forwarded yet. Messages it already forwarded are remembered in `sessions/relay_state.json`, so nothing is sent twice
+3. The relay formats each message as a plain-text email with sender (contact name if configured), caption, GPS coordinates, OpenStreetMap link, altitude, and attachment info. Times are shown in the relay's local time zone (set `TZ` in Docker)
+4. Media attachments (AVIF images, OGG audio) are included as-is
+5. One email per recipient is sent via SMTP, with up to three attempts. If every attempt fails the message is left for the next catch-up pass and, if alerts are configured, you get an alert email
 
 ### Email to Garmin
 
-1. The IMAP client listens for new emails using IDLE (push) or polling (30s interval, if IDLE is unavailable)
+1. The IMAP client listens for new emails using IDLE (push) or polling (30s interval, if IDLE is unavailable). It only searches for unread replies to relay emails, so the rest of the inbox is never read or marked as read
 2. Only replies to emails sent by the relay are processed (validated via Message-ID, sender address, and time window)
-3. The reply text is sent as a caption on the first attachment
-4. Image attachments are transcoded to AVIF, audio to OGG Opus (via ffmpeg)
-5. Media is uploaded to Garmin via presigned S3 URLs
+3. Quoted text, signatures and "Sent from my iPhone" boilerplate are stripped. HTML-only replies are converted to text. The reply is prefixed with the sender's name and capped at 1600 characters
+4. Image attachments (including inline photos from Apple Mail) are transcoded to AVIF, audio to OGG Opus (via ffmpeg), and uploaded to Garmin via presigned S3 URLs. Each send is attempted up to three times
+5. If a reply cannot be delivered (unknown or expired message, unsupported or oversized attachment, transcoding or Garmin error), the replier receives an automatic email explaining why
 
 ### Reply validation
 
@@ -216,6 +295,15 @@ Replies are validated with multiple checks to prevent spam or accidental forward
 - The `In-Reply-To` Message-ID must exist in the relay's sent message store
 - The sender (`From`) must match the original recipient
 - The original message must be within the reply window (default: 7 days)
+- Auto-replies (`Auto-Submitted`) are ignored, replies failing DMARC are dropped, and with `require_authenticated_replies` only DKIM/DMARC-verified replies are accepted
+
+## Monitoring
+
+- `garmin-messenger-relay status` validates the config, tests Garmin, SMTP and IMAP, and reports whether a running relay is connected.
+- `garmin-messenger-relay health` exits non-zero when the relay has been disconnected or unresponsive for more than 3 minutes. The Docker image runs it as its `HEALTHCHECK`; pair it with a restart policy or a watchdog such as [autoheal](https://github.com/willfarrell/docker-autoheal).
+- If Garmin refuses reconnection permanently, the relay exits with status 1 so systemd (`Restart=on-failure`) or Docker (`--restart unless-stopped`) starts it again. Temporary outages are retried indefinitely with backoff.
+- Optional `alerts.email` sends you an email when SignalR has been down for 5 minutes, the Garmin session expired, IMAP login fails, or an email could not be delivered. Alerts of the same type are rate-limited by `cooldown_minutes`.
+- Logs are JSON when `log.pretty` is false, which suits Docker log drivers and log aggregators.
 
 ## Running as a system service
 
@@ -264,7 +352,7 @@ The Windows binary works as-is — just download the `.exe` from [Releases](../.
    - Arguments: `run -config C:\garmin-relay\config.yaml`
    - Start in: `C:\garmin-relay`
 6. **Settings** tab:
-   - Check **If the task fails, restart every** → `1 minute`, up to `3` times
+   - Check **If the task fails, restart every** → `1 minute`, up to `999` times (the relay exits on purpose when Garmin refuses reconnection, so it must be restarted)
    - Uncheck **Stop the task if it runs longer than**
 7. Click **OK** and enter your Windows password
 

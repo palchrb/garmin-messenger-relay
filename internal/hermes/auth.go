@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/palchrb/garmin-messenger-relay/internal/atomicfile"
 )
 
 const (
@@ -136,7 +138,7 @@ func (a *HermesAuth) RequestOTP(ctx context.Context, phone, deviceName string) (
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == 409 {
 		a.logger.Warn("Previous OTP request still active, waiting 30s")
@@ -145,12 +147,12 @@ func (a *HermesAuth) RequestOTP(ctx context.Context, phone, deviceName string) (
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		resp, err = a.doRequest(ctx, "POST", url, headers, bodyBytes)
 		if err != nil {
 			return nil, err
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 	}
 
 	if err := checkResponse(resp); err != nil {
@@ -200,7 +202,7 @@ func (a *HermesAuth) ConfirmOTP(ctx context.Context, otpReq *OtpRequest, otpCode
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := checkResponse(resp); err != nil {
 		return err
@@ -236,7 +238,7 @@ func (a *HermesAuth) GetRegistrations(ctx context.Context) (map[string]interface
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := checkResponse(resp); err != nil {
 		return nil, fmt.Errorf("getting registrations: %w", err)
@@ -266,7 +268,7 @@ func (a *HermesAuth) DeleteAppRegistration(ctx context.Context, instanceID strin
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
@@ -293,7 +295,7 @@ func (a *HermesAuth) DeleteUserRegistration(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
@@ -327,7 +329,7 @@ func (a *HermesAuth) UpdatePnsHandle(ctx context.Context, pnsHandle string) erro
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := checkResponse(resp); err != nil {
 		return fmt.Errorf("updating PNS handle: %w", err)
@@ -433,7 +435,7 @@ func (a *HermesAuth) refreshHermesTokenLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := checkResponse(resp); err != nil {
 		return err
@@ -486,7 +488,7 @@ func (a *HermesAuth) storeCredentials(instanceID string, tokens *AccessAndRefres
 		"expires_at":    a.ExpiresAt,
 	}, "", "  ")
 
-	if err := os.WriteFile(credsPath, data, 0o600); err != nil {
+	if err := atomicfile.WriteFile(credsPath, data, 0o600); err != nil {
 		a.logger.Error("Failed to save credentials", "error", err)
 	} else {
 		a.logger.Debug("Saved credentials", "path", credsPath)
@@ -523,9 +525,9 @@ func (a *HermesAuth) doRequest(ctx context.Context, method, url string, headers 
 
 	// Read body for logging, then replace it so callers can still read it.
 	respBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	a.logResponse(resp)
-	a.logger.Log(context.TODO(), LevelTrace, "  Response body", "length", len(respBody), "json", truncate(string(respBody), 2000))
+	a.logger.Log(context.TODO(), LevelTrace, "  Response body", "length", len(respBody), "json", truncate(maskSecrets(string(respBody)), 2000))
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
 	return resp, nil
@@ -534,15 +536,10 @@ func (a *HermesAuth) doRequest(ctx context.Context, method, url string, headers 
 func (a *HermesAuth) logRequest(method, url string, headers http.Header, body []byte) {
 	a.logger.Log(context.TODO(), LevelTrace, ">>> "+method, "url", url)
 	for k, v := range headers {
-		val := strings.Join(v, ", ")
-		if len(val) > 120 {
-			a.logger.Log(context.TODO(), LevelTrace, "  Request header", "key", k, "value", val[:60]+"..."+val[len(val)-20:])
-		} else {
-			a.logger.Log(context.TODO(), LevelTrace, "  Request header", "key", k, "value", val)
-		}
+		a.logger.Log(context.TODO(), LevelTrace, "  Request header", "key", k, "value", maskHeaderValue(k, strings.Join(v, ", ")))
 	}
 	if body != nil {
-		a.logger.Log(context.TODO(), LevelTrace, "  Request body", "json", string(body))
+		a.logger.Log(context.TODO(), LevelTrace, "  Request body", "json", maskSecrets(string(body)))
 	}
 }
 
@@ -565,4 +562,69 @@ func checkResponse(resp *http.Response) error {
 		URL:        resp.Request.URL.String(),
 		Method:     resp.Request.Method,
 	}
+}
+
+// secretJSONFields lists JSON keys whose values must never reach the logs,
+// even at trace level: trace output is routinely pasted into bug reports.
+var secretJSONFields = []string{
+	"access_token", "accessToken", "refresh_token", "refreshToken",
+	"verificationCode", "pnsHandle", "securityToken",
+}
+
+// maskSecrets replaces the values of known secret fields in a JSON document
+// with a redaction marker. The input is treated as text, so it also works on
+// partially valid or truncated bodies.
+func maskSecrets(s string) string {
+	for _, field := range secretJSONFields {
+		s = maskJSONField(s, field)
+	}
+	return s
+}
+
+func maskJSONField(s, field string) string {
+	needle := `"` + field + `"`
+	var out strings.Builder
+	for {
+		i := strings.Index(s, needle)
+		if i < 0 {
+			out.WriteString(s)
+			return out.String()
+		}
+		j := i + len(needle)
+		// Skip whitespace, colon, whitespace.
+		for j < len(s) && (s[j] == ' ' || s[j] == ':' || s[j] == '\t') {
+			j++
+		}
+		if j >= len(s) || s[j] != '"' {
+			out.WriteString(s[:j])
+			s = s[j:]
+			continue
+		}
+		// Find the closing quote of the string value (no escapes in tokens).
+		k := strings.IndexByte(s[j+1:], '"')
+		if k < 0 {
+			out.WriteString(s[:j+1])
+			out.WriteString("[REDACTED]")
+			return out.String()
+		}
+		out.WriteString(s[:j+1])
+		out.WriteString("[REDACTED]")
+		s = s[j+1+k:]
+	}
+}
+
+// maskHeaderValue hides credentials carried in headers while keeping enough
+// of the value to recognise its shape.
+func maskHeaderValue(key, val string) string {
+	switch strings.ToLower(key) {
+	case "authorization", "registrationapikey":
+		if len(val) > 16 {
+			return val[:10] + "...[REDACTED]"
+		}
+		return "[REDACTED]"
+	}
+	if len(val) > 120 {
+		return val[:60] + "..." + val[len(val)-20:]
+	}
+	return val
 }

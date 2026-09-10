@@ -42,6 +42,8 @@ type Message struct {
 	// If empty, the SMTP server assigns one automatically.
 	// Format: "<unique-id@domain>" e.g. "<gmr-CONVID-MSGID@garmin-messenger-relay.local>"
 	MessageID string
+	// InReplyTo, when set, threads this email under the given Message-ID.
+	InReplyTo string
 }
 
 // Send sends the message to all recipients.
@@ -55,92 +57,103 @@ func (m *Mailer) Send(msg Message) error {
 		return fmt.Errorf("building email: %w", err)
 	}
 
-	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
-
-	switch m.cfg.TLS {
-	case "ssl":
-		return m.sendSSL(addr, raw, msg.To)
-	case "starttls":
-		return m.sendStartTLS(addr, raw, msg.To)
-	default: // "none"
-		return m.sendPlain(addr, raw, msg.To)
-	}
-}
-
-// sendStartTLS connects plain and upgrades to TLS via STARTTLS (port 587).
-func (m *Mailer) sendStartTLS(addr string, raw []byte, to []string) error {
-	c, err := smtp.Dial(addr)
+	c, err := m.connect()
 	if err != nil {
-		return fmt.Errorf("dialing %s: %w", addr, err)
-	}
-	defer c.Close()
-
-	if err := c.Hello("localhost"); err != nil {
 		return err
 	}
+	defer func() { _ = c.Close() }()
 
-	tlsCfg := &tls.Config{ServerName: m.cfg.Host}
-	if ok, _ := c.Extension("STARTTLS"); ok {
+	return m.deliver(c, raw, msg.To)
+}
+
+// Ping checks that the SMTP server is reachable, negotiates the configured
+// encryption and accepts authentication. It does not send any email.
+func (m *Mailer) Ping() error {
+	c, err := m.connect()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.Close() }()
+	return c.Quit()
+}
+
+// connect dials the SMTP server according to the configured TLS mode and
+// authenticates. The caller must Close the returned client.
+func (m *Mailer) connect() (*smtp.Client, error) {
+	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
+	tlsCfg := &tls.Config{ServerName: m.cfg.Host, MinVersion: tls.VersionTLS12}
+
+	var c *smtp.Client
+	switch m.cfg.TLS {
+	case "ssl":
+		conn, err := tls.Dial("tcp", addr, tlsCfg)
+		if err != nil {
+			return nil, fmt.Errorf("TLS dial %s: %w", addr, err)
+		}
+		c, err = smtp.NewClient(conn, m.cfg.Host)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("SMTP client: %w", err)
+		}
+
+	case "starttls":
+		var err error
+		c, err = smtp.Dial(addr)
+		if err != nil {
+			return nil, fmt.Errorf("dialing %s: %w", addr, err)
+		}
+		if err := c.Hello("localhost"); err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("EHLO: %w", err)
+		}
+		if ok, _ := c.Extension("STARTTLS"); !ok {
+			_ = c.Close()
+			return nil, fmt.Errorf("server %s does not offer STARTTLS; refusing to continue unencrypted (set smtp.tls to \"ssl\" or, for a trusted local relay, \"none\")", addr)
+		}
 		if err := c.StartTLS(tlsCfg); err != nil {
-			return fmt.Errorf("STARTTLS: %w", err)
+			_ = c.Close()
+			return nil, fmt.Errorf("STARTTLS: %w", err)
+		}
+
+	default: // "none"
+		var err error
+		c, err = smtp.Dial(addr)
+		if err != nil {
+			return nil, fmt.Errorf("dialing %s: %w", addr, err)
+		}
+		if err := c.Hello("localhost"); err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("EHLO: %w", err)
 		}
 	}
 
 	if m.cfg.Username != "" {
 		auth := smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
 		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("SMTP auth: %w", err)
+			_ = c.Close()
+			return nil, fmt.Errorf("SMTP auth: %w", err)
 		}
 	}
-
-	return m.deliver(c, raw, to)
-}
-
-// sendSSL connects directly over TLS (port 465).
-func (m *Mailer) sendSSL(addr string, raw []byte, to []string) error {
-	tlsCfg := &tls.Config{ServerName: m.cfg.Host}
-	conn, err := tls.Dial("tcp", addr, tlsCfg)
-	if err != nil {
-		return fmt.Errorf("TLS dial %s: %w", addr, err)
-	}
-
-	c, err := smtp.NewClient(conn, m.cfg.Host)
-	if err != nil {
-		return fmt.Errorf("SMTP client: %w", err)
-	}
-	defer c.Close()
-
-	if m.cfg.Username != "" {
-		auth := smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
-		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("SMTP auth: %w", err)
-		}
-	}
-
-	return m.deliver(c, raw, to)
-}
-
-// sendPlain connects with no encryption (port 25).
-func (m *Mailer) sendPlain(addr string, raw []byte, to []string) error {
-	var auth smtp.Auth
-	if m.cfg.Username != "" {
-		auth = smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
-	}
-	from, _ := parseAddress(m.cfg.From)
-	return smtp.SendMail(addr, auth, from, to, raw)
+	return c, nil
 }
 
 // deliver sets envelope and writes the message data on an open SMTP client.
 func (m *Mailer) deliver(c *smtp.Client, raw []byte, to []string) error {
-	from, _ := parseAddress(m.cfg.From)
+	from, err := parseAddress(m.cfg.From)
+	if err != nil {
+		return fmt.Errorf("invalid smtp.from %q: %w", m.cfg.From, err)
+	}
 
 	if err := c.Mail(from); err != nil {
 		return fmt.Errorf("MAIL FROM: %w", err)
 	}
 	for _, r := range to {
-		addr, _ := parseAddress(r)
+		addr, err := parseAddress(r)
+		if err != nil {
+			return fmt.Errorf("invalid recipient %q: %w", r, err)
+		}
 		if err := c.Rcpt(addr); err != nil {
-			return fmt.Errorf("RCPT TO %s: %w", r, err)
+			return fmt.Errorf("RCPT TO %s: %w", addr, err)
 		}
 	}
 
@@ -149,58 +162,13 @@ func (m *Mailer) deliver(c *smtp.Client, raw []byte, to []string) error {
 		return fmt.Errorf("DATA: %w", err)
 	}
 	if _, err := wc.Write(raw); err != nil {
+		_ = wc.Close()
 		return fmt.Errorf("writing message: %w", err)
 	}
-	return wc.Close()
-}
-
-// Ping checks that the SMTP server is reachable and accepts authentication.
-// It does not send any email.
-func (m *Mailer) Ping() error {
-	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
-
-	switch m.cfg.TLS {
-	case "ssl":
-		tlsCfg := &tls.Config{ServerName: m.cfg.Host}
-		conn, err := tls.Dial("tcp", addr, tlsCfg)
-		if err != nil {
-			return fmt.Errorf("TLS dial %s: %w", addr, err)
-		}
-		c, err := smtp.NewClient(conn, m.cfg.Host)
-		if err != nil {
-			return fmt.Errorf("SMTP client: %w", err)
-		}
-		defer c.Close()
-		if m.cfg.Username != "" {
-			auth := smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
-			if err := c.Auth(auth); err != nil {
-				return fmt.Errorf("SMTP auth: %w", err)
-			}
-		}
-		return nil
-
-	default: // starttls or none
-		c, err := smtp.Dial(addr)
-		if err != nil {
-			return fmt.Errorf("dialing %s: %w", addr, err)
-		}
-		defer c.Close()
-		if m.cfg.TLS == "starttls" {
-			tlsCfg := &tls.Config{ServerName: m.cfg.Host}
-			if ok, _ := c.Extension("STARTTLS"); ok {
-				if err := c.StartTLS(tlsCfg); err != nil {
-					return fmt.Errorf("STARTTLS: %w", err)
-				}
-			}
-		}
-		if m.cfg.Username != "" {
-			auth := smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
-			if err := c.Auth(auth); err != nil {
-				return fmt.Errorf("SMTP auth: %w", err)
-			}
-		}
-		return nil
+	if err := wc.Close(); err != nil {
+		return fmt.Errorf("finishing DATA: %w", err)
 	}
+	return c.Quit()
 }
 
 // buildRaw assembles the raw MIME email bytes.
@@ -213,24 +181,27 @@ func (m *Mailer) buildRaw(msg Message) ([]byte, error) {
 		from = m.cfg.Username
 	}
 
-	buf.WriteString("From: " + from + "\r\n")
-	buf.WriteString("To: " + strings.Join(msg.To, ", ") + "\r\n")
-	buf.WriteString("Subject: " + encodeMIMEHeader(msg.Subject) + "\r\n")
+	buf.WriteString("From: " + sanitizeHeader(from) + "\r\n")
+	buf.WriteString("To: " + sanitizeHeader(strings.Join(msg.To, ", ")) + "\r\n")
+	buf.WriteString("Subject: " + encodeMIMEHeader(sanitizeHeader(msg.Subject)) + "\r\n")
 	buf.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
 	if msg.MessageID != "" {
-		buf.WriteString("Message-ID: " + msg.MessageID + "\r\n")
+		buf.WriteString("Message-ID: " + sanitizeHeader(msg.MessageID) + "\r\n")
 	}
+	if msg.InReplyTo != "" {
+		buf.WriteString("In-Reply-To: " + sanitizeHeader(msg.InReplyTo) + "\r\n")
+		buf.WriteString("References: " + sanitizeHeader(msg.InReplyTo) + "\r\n")
+	}
+	buf.WriteString("Auto-Submitted: auto-generated\r\n")
 	buf.WriteString("MIME-Version: 1.0\r\n")
 
 	if len(msg.Attachments) == 0 {
 		buf.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 		buf.WriteString("Content-Transfer-Encoding: quoted-printable\r\n")
 		buf.WriteString("\r\n")
-		qw := quotedprintable.NewWriter(&buf)
-		if _, err := qw.Write([]byte(msg.Body)); err != nil {
+		if err := writeQuotedPrintable(&buf, msg.Body); err != nil {
 			return nil, err
 		}
-		qw.Close()
 		return buf.Bytes(), nil
 	}
 
@@ -247,18 +218,16 @@ func (m *Mailer) buildRaw(msg Message) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	qw := quotedprintable.NewWriter(tw)
-	if _, err := qw.Write([]byte(msg.Body)); err != nil {
+	if err := writeQuotedPrintable(tw, msg.Body); err != nil {
 		return nil, err
 	}
-	qw.Close()
 
 	// Attachment parts
 	for _, a := range msg.Attachments {
 		ah := textproto.MIMEHeader{}
-		ah.Set("Content-Type", a.ContentType)
+		ah.Set("Content-Type", sanitizeHeader(a.ContentType))
 		ah.Set("Content-Transfer-Encoding", "base64")
-		ah.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, a.Filename))
+		ah.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, sanitizeFilename(a.Filename)))
 		aw, err := mw.CreatePart(ah)
 		if err != nil {
 			return nil, err
@@ -278,8 +247,39 @@ func (m *Mailer) buildRaw(msg Message) ([]byte, error) {
 		}
 	}
 
-	mw.Close()
+	if err := mw.Close(); err != nil {
+		return nil, err
+	}
 	return buf.Bytes(), nil
+}
+
+// writeQuotedPrintable writes body to w using quoted-printable encoding.
+func writeQuotedPrintable(w interface{ Write([]byte) (int, error) }, body string) error {
+	qw := quotedprintable.NewWriter(w)
+	if _, err := qw.Write([]byte(body)); err != nil {
+		return err
+	}
+	return qw.Close()
+}
+
+// sanitizeHeader strips CR and LF so untrusted values (Garmin sender names,
+// caption-parsed addresses) can never inject additional email headers.
+func sanitizeHeader(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.TrimSpace(s)
+}
+
+// sanitizeFilename keeps a filename safe for a quoted Content-Disposition
+// parameter.
+func sanitizeFilename(s string) string {
+	s = sanitizeHeader(s)
+	s = strings.ReplaceAll(s, `"`, "")
+	s = strings.ReplaceAll(s, `\`, "")
+	if s == "" {
+		return "attachment"
+	}
+	return s
 }
 
 // parseAddress extracts the raw email address from a display-name address.
@@ -287,7 +287,7 @@ func (m *Mailer) buildRaw(msg Message) ([]byte, error) {
 func parseAddress(s string) (string, error) {
 	addr, err := mail.ParseAddress(s)
 	if err != nil {
-		return s, err
+		return "", err
 	}
 	return addr.Address, nil
 }

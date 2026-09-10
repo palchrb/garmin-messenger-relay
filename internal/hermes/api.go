@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -329,7 +330,7 @@ func (api *HermesAPI) UploadMedia(ctx context.Context, signedURL *SignedUploadUr
 	if _, err := part.Write(fileData); err != nil {
 		return fmt.Errorf("writing file data: %w", err)
 	}
-	w.Close()
+	_ = w.Close()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", signedURL.UploadUrl, &buf)
 	if err != nil {
@@ -342,7 +343,7 @@ func (api *HermesAPI) UploadMedia(ctx context.Context, signedURL *SignedUploadUr
 	if err != nil {
 		return fmt.Errorf("S3 upload: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	api.logResponse(resp, respBody)
@@ -391,7 +392,7 @@ func (api *HermesAPI) DownloadMedia(ctx context.Context, msgUUID, mediaID, messa
 	if err != nil {
 		return nil, fmt.Errorf("downloading media: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	api.logger.Log(context.TODO(), LevelTrace, "<<< Response", "status", resp.StatusCode, "bytes", len(respBody))
@@ -570,7 +571,7 @@ func (api *HermesAPI) doGet(ctx context.Context, path string, query url.Values, 
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", u, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	api.logResponse(resp, body)
@@ -638,7 +639,7 @@ func (api *HermesAPI) doMutate(ctx context.Context, method, path string, reqBody
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", method, u, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	api.logResponse(resp, body)
@@ -664,18 +665,10 @@ func (api *HermesAPI) doMutate(ctx context.Context, method, path string, reqBody
 func (api *HermesAPI) logRequest(method, url string, headers http.Header, body []byte) {
 	api.logger.Log(context.TODO(), LevelTrace, ">>> "+method, "url", url)
 	for k, v := range headers {
-		val := v[0]
-		if len(v) > 1 {
-			val = fmt.Sprintf("%v", v)
-		}
-		if len(val) > 120 {
-			api.logger.Log(context.TODO(), LevelTrace, "  Request header", "key", k, "value", val[:60]+"..."+val[len(val)-20:])
-		} else {
-			api.logger.Log(context.TODO(), LevelTrace, "  Request header", "key", k, "value", val)
-		}
+		api.logger.Log(context.TODO(), LevelTrace, "  Request header", "key", k, "value", maskHeaderValue(k, strings.Join(v, ", ")))
 	}
 	if body != nil {
-		api.logger.Log(context.TODO(), LevelTrace, "  Request body", "json", truncate(string(body), 2000))
+		api.logger.Log(context.TODO(), LevelTrace, "  Request body", "json", truncate(maskSecrets(string(body)), 2000))
 	}
 }
 
@@ -685,7 +678,7 @@ func (api *HermesAPI) logResponse(resp *http.Response, body []byte) {
 		api.logger.Log(context.TODO(), LevelTrace, "  Response header", "key", k, "value", v[0])
 	}
 	if len(body) > 0 {
-		api.logger.Log(context.TODO(), LevelTrace, "  Response body", "json", truncate(string(body), 2000))
+		api.logger.Log(context.TODO(), LevelTrace, "  Response body", "json", truncate(maskSecrets(string(body)), 2000))
 	}
 }
 

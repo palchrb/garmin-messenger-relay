@@ -82,8 +82,8 @@ func readVarintTest(t *testing.T, r io.Reader) uint64 {
 
 func TestMCS_LoginPacket(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	mcs := newMCSClient(client, 12345, 67890, []string{"pid-1"}, slog.Default())
 
@@ -134,8 +134,8 @@ func TestMCS_LoginPacket(t *testing.T) {
 
 func TestMCS_LoginResponse(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	connected := make(chan struct{}, 1)
 	mcs := newMCSClient(client, 100, 200, nil, slog.Default())
@@ -171,8 +171,8 @@ func TestMCS_LoginResponse(t *testing.T) {
 
 func TestMCS_HeartbeatPingResponse(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	mcs := newMCSClient(client, 100, 200, nil, slog.Default())
 
@@ -210,8 +210,8 @@ func TestMCS_HeartbeatPingResponse(t *testing.T) {
 
 func TestMCS_DataMessageStanza(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	var receivedPersistentID string
 	var receivedPayload []byte
@@ -263,11 +263,10 @@ func TestMCS_DataMessageStanza(t *testing.T) {
 	cancel()
 }
 
-
 func TestMCS_Close(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	mcs := newMCSClient(client, 100, 200, nil, slog.Default())
 
@@ -300,8 +299,8 @@ func TestMCS_Close(t *testing.T) {
 
 func TestMCS_ContextCancel(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	disconnected := make(chan struct{}, 1)
 	mcs := newMCSClient(client, 100, 200, nil, slog.Default())
@@ -362,8 +361,8 @@ func discardLoginPacket(t *testing.T, r io.Reader) {
 
 func TestMCS_HeartbeatTimerSendsping(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	mcs := newMCSClient(client, 100, 200, nil, slog.Default())
 	mcs.heartbeatInterval = 100 * time.Millisecond
@@ -400,8 +399,8 @@ func TestMCS_HeartbeatTimerSendsping(t *testing.T) {
 
 func TestMCS_VarintOverflow(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	mcs := newMCSClient(client, 100, 200, nil, slog.Default())
 
@@ -440,8 +439,8 @@ func TestMCS_VarintOverflow(t *testing.T) {
 
 func TestMCS_IqStanzaIgnored(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	var mu sync.Mutex
 	dataReceived := false

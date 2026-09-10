@@ -1,10 +1,14 @@
 # garmin-messenger-relay configuration
 # Run "garmin-messenger-relay login" to authenticate after editing this file.
+#
+# Secrets can be kept out of this file by setting the environment variables
+# GMR_SMTP_PASSWORD and GMR_IMAP_PASSWORD instead.
 
 garmin:
   # E.164 phone number registered with the Garmin Messenger app.
   phone: "+4712345678"
-  # Directory where the Garmin session token is stored.
+  # Directory where the Garmin session token and relay state are stored.
+  # Relative paths are resolved next to this config file.
   session_dir: "./sessions"
 
 smtp:
@@ -14,28 +18,52 @@ smtp:
   # For Gmail: use an App Password (https://myaccount.google.com/apppasswords).
   password: "your-app-password"
   from: "Garmin Forwarder <you@gmail.com>"
-  # tls: none | starttls | ssl
+  # tls: starttls | ssl | none. With starttls the relay refuses to send if the
+  # server does not offer encryption.
   tls: "starttls"
 
 # IMAP settings for receiving replies (optional but recommended for two-way messaging).
-# Use the same account as SMTP. For Gmail, generate an App Password.
+# Remove or leave host empty to run one-way (Garmin -> email only).
+#
+# The relay only touches emails that are replies to messages it sent itself;
+# other mail in the inbox is left untouched and unread.
 imap:
   host: "imap.gmail.com"
   port: 993
   username: "you@gmail.com"
   password: "your-app-password"
-  reply_window_days: 7     # ignore replies older than this
+  reply_window_days: 7     # ignore replies to relay emails older than this
   max_attachment_mb: 5     # reject inbound attachments larger than this
+  # Only accept replies your mail provider has verified (DKIM/DMARC pass).
+  # Recommended when the reply address is not under your control.
+  require_authenticated_replies: false
 
 forwarding:
   # All incoming messages are forwarded to these addresses.
   default_recipients:
     - "you@example.com"
 
+  # Only forward messages from these phone numbers (E.164). Anyone who knows
+  # your Garmin number can message it, so restrict this if the relay should
+  # only serve your own devices. Empty = forward from anyone.
+  allowed_senders: []
+  #  - "+4712345678"
+
+  # Names shown in emails instead of raw phone numbers.
+  contacts: {}
+  #  "+4712345678": "Ola"
+
   # If true, email addresses found in a media caption are also used as recipients.
   # Example: send a photo with caption "check this out admin@example.com" to route
   # that specific message to admin@example.com in addition to default_recipients.
-  caption_routing: true
+  # Anyone allowed to send to the relay can make it email these addresses, so
+  # combine with allowed_senders and/or caption_routing_allowlist.
+  caption_routing: false
+
+  # Restrict caption routing to these addresses or domains. Empty = any address.
+  caption_routing_allowlist: []
+  #  - "@example.com"
+  #  - "friend@other.com"
 
   # If true, caption-parsed addresses REPLACE default_recipients for that message.
   # If false (default), caption addresses are ADDED to default_recipients.
@@ -46,8 +74,18 @@ forwarding:
   forward_media: true
   forward_location: true
 
+  # How often (minutes) to poll Garmin for messages missed while offline, in
+  # addition to the check done on every reconnect. 0 disables polling.
+  catchup_interval_minutes: 10
+
 log:
-  # level: debug | info | warn | error
+  # level: trace | debug | info | warn | error
   level: "info"
   # pretty: true for human-readable output, false for JSON (better for log aggregators).
   pretty: true
+
+# Optional: receive email alerts when something goes wrong (Garmin disconnected,
+# IMAP auth failure, session expired). Leave empty to disable.
+# alerts:
+#   email: "admin@example.com"
+#   cooldown_minutes: 30

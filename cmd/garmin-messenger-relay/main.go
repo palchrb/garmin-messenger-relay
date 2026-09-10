@@ -7,14 +7,16 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
-	"github.com/palchrb/garmin-messenger-relay/internal/relay"
 	gm "github.com/palchrb/garmin-messenger-relay/internal/hermes"
+	"github.com/palchrb/garmin-messenger-relay/internal/relay"
 )
 
 // Version variables set at build time via -ldflags.
@@ -25,6 +27,10 @@ var (
 )
 
 const defaultConfig = "config.yaml"
+
+// healthMaxAge is how stale the health file may be before "health" reports
+// the relay as unhealthy. The relay refreshes it every minute.
+const healthMaxAge = 3 * time.Minute
 
 func main() {
 	if len(os.Args) < 2 {
@@ -41,6 +47,8 @@ func main() {
 		cmdRun()
 	case "status":
 		cmdStatus()
+	case "health":
+		cmdHealth()
 	case "test-smtp":
 		cmdTestSMTP()
 	case "init":
@@ -67,12 +75,18 @@ Commands:
   login       Authenticate with Garmin Messenger via SMS OTP
   logout      Remove saved Garmin session
   run         Start the email forwarder (default command)
-  status      Check Garmin session and SMTP connectivity
+  status      Check Garmin session, SMTP and IMAP connectivity
+  health      Exit 0 if a running relay is connected (for Docker HEALTHCHECK)
   test-smtp   Send a test email to verify SMTP settings
   version     Print version information
 
 Flags:
-  -config <path>   Path to config file (default: config.yaml)
+  -config <path>   Path to config file (default: config.yaml, or $GMR_CONFIG)
+
+Environment:
+  GMR_CONFIG          Config file path (overridden by -config)
+  GMR_SMTP_PASSWORD   SMTP password (overrides smtp.password)
+  GMR_IMAP_PASSWORD   IMAP password (overrides imap.password)
 
 Examples:
   garmin-messenger-relay init
@@ -84,18 +98,44 @@ Examples:
 `)
 }
 
-// configFlag parses -config <path> from os.Args[2:], defaulting to config.yaml.
+// configFlag parses -config <path> from os.Args[2:], falling back to the
+// GMR_CONFIG environment variable and then config.yaml.
 func configFlag() string {
 	args := os.Args[2:]
 	for i, a := range args {
 		if (a == "-config" || a == "--config") && i+1 < len(args) {
 			return args[i+1]
 		}
+		if strings.HasPrefix(a, "-config=") || strings.HasPrefix(a, "--config=") {
+			return a[strings.Index(a, "=")+1:]
+		}
+	}
+	if v := os.Getenv(relay.EnvConfigPath); v != "" {
+		return v
 	}
 	return defaultConfig
 }
 
-// setupLogger configures zerolog and slog from the log config.
+// loadConfig loads and optionally validates the config, exiting with a
+// helpful message on failure.
+func loadConfig(validate bool) *relay.Config {
+	cfgPath := configFlag()
+	cfg, err := relay.Load(cfgPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n\nRun 'garmin-messenger-relay init' to create a config file.\n", err)
+		os.Exit(1)
+	}
+	if validate {
+		if err := cfg.Validate(); err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid config (%s): %v\n", cfgPath, err)
+			os.Exit(1)
+		}
+	}
+	return cfg
+}
+
+// setupLogger configures zerolog (used by main) and slog (used by the relay
+// internals) with the same level and output format.
 func setupLogger(cfg *relay.Config) {
 	level, err := zerolog.ParseLevel(cfg.Log.Level)
 	if err != nil {
@@ -103,15 +143,10 @@ func setupLogger(cfg *relay.Config) {
 	}
 	zerolog.SetGlobalLevel(level)
 
-	if cfg.Log.Pretty {
-		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	}
-
-	// Configure slog (used by relay internals) to the same level.
 	var slogLevel slog.Level
 	switch cfg.Log.Level {
 	case "trace":
-		slogLevel = slog.Level(-8) // LevelTrace: verbose HTTP request/response details
+		slogLevel = gm.LevelTrace // verbose HTTP request/response details
 	case "debug":
 		slogLevel = slog.LevelDebug
 	case "warn":
@@ -121,7 +156,14 @@ func setupLogger(cfg *relay.Config) {
 	default:
 		slogLevel = slog.LevelInfo
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slogLevel})))
+
+	opts := &slog.HandlerOptions{Level: slogLevel}
+	if cfg.Log.Pretty {
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, opts)))
+	} else {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, opts)))
+	}
 }
 
 // cmdInit writes an example config.yaml.
@@ -142,12 +184,7 @@ func cmdInit() {
 
 // cmdLogin runs the interactive Garmin OTP login flow.
 func cmdLogin() {
-	cfgPath := configFlag()
-	cfg, err := relay.Load(cfgPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n\nRun 'garmin-messenger-relay init' to create a config file.\n", err)
-		os.Exit(1)
-	}
+	cfg := loadConfig(false)
 	setupLogger(cfg)
 
 	ctx := context.Background()
@@ -166,10 +203,6 @@ func cmdLogin() {
 	}
 
 	sessDir := cfg.Garmin.SessionDir
-	if sessDir == "" {
-		sessDir = "./sessions"
-	}
-
 	if err := os.MkdirAll(sessDir, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating session directory: %v\n", err)
 		os.Exit(1)
@@ -202,18 +235,8 @@ func cmdLogin() {
 
 // cmdLogout removes the saved Garmin session.
 func cmdLogout() {
-	cfgPath := configFlag()
-	cfg, err := relay.Load(cfgPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
-	}
-
-	sessDir := cfg.Garmin.SessionDir
-	if sessDir == "" {
-		sessDir = "./sessions"
-	}
-	credsPath := sessDir + "/hermes_credentials.json"
+	cfg := loadConfig(false)
+	credsPath := filepath.Join(cfg.Garmin.SessionDir, "hermes_credentials.json")
 
 	if err := os.Remove(credsPath); err != nil {
 		if os.IsNotExist(err) {
@@ -227,26 +250,26 @@ func cmdLogout() {
 	fmt.Println("Session removed. Run 'garmin-messenger-relay login' to re-authenticate.")
 }
 
-// cmdStatus checks the Garmin session and SMTP connectivity.
+// cmdStatus checks the config, the Garmin session and the mail servers.
 func cmdStatus() {
-	cfgPath := configFlag()
-	cfg, err := relay.Load(cfgPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
-	}
+	cfg := loadConfig(false)
 	setupLogger(cfg)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 	ok := true
+
+	fmt.Print("Config ... ")
+	if err := cfg.Validate(); err != nil {
+		fmt.Printf("FAIL\n  %v\n", err)
+		ok = false
+	} else {
+		fmt.Println("OK")
+	}
 
 	// Check Garmin session
 	fmt.Print("Garmin session ... ")
-	sessDir := cfg.Garmin.SessionDir
-	if sessDir == "" {
-		sessDir = "./sessions"
-	}
-	auth := gm.NewHermesAuth(gm.WithSessionDir(sessDir))
+	auth := gm.NewHermesAuth(gm.WithSessionDir(cfg.Garmin.SessionDir))
 	if err := auth.Resume(ctx); err != nil {
 		fmt.Printf("FAIL\n  %v\n", err)
 		ok = false
@@ -270,9 +293,41 @@ func cmdStatus() {
 		fmt.Println("OK")
 	}
 
+	// Check IMAP
+	fmt.Print("IMAP connectivity ... ")
+	if !cfg.IMAPEnabled() {
+		fmt.Println("disabled (one-way relay)")
+	} else if err := relay.NewIMAPClient(cfg.IMAP, slog.Default(), nil).Check(); err != nil {
+		fmt.Printf("FAIL\n  %v\n", err)
+		ok = false
+	} else {
+		fmt.Println("OK")
+	}
+
+	// Running relay, if any
+	fmt.Print("Relay process ... ")
+	if h, err := relay.ReadHealth(cfg.Garmin.SessionDir); err != nil {
+		fmt.Println("not running (no health file)")
+	} else {
+		age := time.Since(h.UpdatedAt).Round(time.Second)
+		switch {
+		case age > healthMaxAge:
+			fmt.Printf("stale (last update %s ago)\n", age)
+		case h.Connected:
+			fmt.Printf("running, connected (updated %s ago)\n", age)
+		default:
+			fmt.Printf("running, DISCONNECTED (updated %s ago)\n", age)
+		}
+	}
+
 	// Print forwarding summary
 	fmt.Printf("\nForwarding config:\n")
 	fmt.Printf("  Default recipients: %v\n", cfg.Forwarding.DefaultRecipients)
+	if len(cfg.Forwarding.AllowedSenders) > 0 {
+		fmt.Printf("  Allowed senders:    %v\n", cfg.Forwarding.AllowedSenders)
+	} else {
+		fmt.Printf("  Allowed senders:    anyone (set forwarding.allowed_senders to restrict)\n")
+	}
 	fmt.Printf("  Caption routing:    %v\n", cfg.Forwarding.CaptionRouting)
 
 	if !ok {
@@ -280,18 +335,31 @@ func cmdStatus() {
 	}
 }
 
+// cmdHealth exits 0 when a running relay reported itself connected recently,
+// 1 otherwise. It makes no network calls, so it is cheap enough for a
+// Docker HEALTHCHECK or a systemd watchdog script.
+func cmdHealth() {
+	cfg := loadConfig(false)
+	h, err := relay.ReadHealth(cfg.Garmin.SessionDir)
+	if err != nil {
+		fmt.Printf("unhealthy: %v\n", err)
+		os.Exit(1)
+	}
+	age := time.Since(h.UpdatedAt)
+	if age > healthMaxAge {
+		fmt.Printf("unhealthy: health file is %s old\n", age.Round(time.Second))
+		os.Exit(1)
+	}
+	if !h.Connected {
+		fmt.Println("unhealthy: relay reports SignalR disconnected")
+		os.Exit(1)
+	}
+	fmt.Println("healthy")
+}
+
 // cmdTestSMTP sends a test email to verify SMTP settings.
 func cmdTestSMTP() {
-	cfgPath := configFlag()
-	cfg, err := relay.Load(cfgPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
-	}
-	if err := cfg.Validate(); err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid config: %v\n", err)
-		os.Exit(1)
-	}
+	cfg := loadConfig(true)
 	setupLogger(cfg)
 
 	if len(cfg.Forwarding.DefaultRecipients) == 0 {
@@ -323,16 +391,7 @@ func cmdTestSMTP() {
 
 // cmdRun starts the email forwarder.
 func cmdRun() {
-	cfgPath := configFlag()
-	cfg, err := relay.Load(cfgPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n\nRun 'garmin-messenger-relay init' to create a config file.\n", err)
-		os.Exit(1)
-	}
-	if err := cfg.Validate(); err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid config: %v\n", err)
-		os.Exit(1)
-	}
+	cfg := loadConfig(true)
 	setupLogger(cfg)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -356,6 +415,8 @@ func cmdRun() {
 		Msg("Starting garmin-messenger-relay")
 
 	if err := fwd.Run(ctx); err != nil {
+		// A non-zero exit lets systemd/Docker restart the relay after the
+		// Garmin connection has been lost permanently.
 		log.Error().Err(err).Msg("Relay exited with error")
 		os.Exit(1)
 	}

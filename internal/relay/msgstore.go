@@ -3,12 +3,15 @@ package relay
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/palchrb/garmin-messenger-relay/internal/atomicfile"
 )
 
 // SentMessage records the metadata of an email sent on behalf of a Garmin message.
@@ -30,17 +33,21 @@ type SentMessage struct {
 }
 
 // MsgStore persists sent-message metadata so replies can be matched to Garmin
-// conversations across restarts.
+// conversations across restarts. Each forwarded email has its own Message-ID
+// and exactly one recipient, so entries are keyed by Message-ID.
 type MsgStore struct {
-	mu       sync.RWMutex
-	path     string
-	messages map[string]SentMessage // keyed by MessageID
+	mu         sync.RWMutex
+	path       string
+	messages   map[string]SentMessage // keyed by MessageID
 	windowDays int
 }
 
-// NewMsgStore creates or loads a store from path.
-// windowDays entries older than that are pruned on load and lookup.
-func NewMsgStore(sessionDir string, windowDays int) (*MsgStore, error) {
+// NewMsgStore creates or loads a store from path. Entries older than
+// windowDays are pruned on load and ignored on lookup. A store file that
+// cannot be parsed is moved aside and the relay starts with an empty store,
+// since refusing to start would be worse than losing reply routing for
+// messages already sent.
+func NewMsgStore(sessionDir string, windowDays int, log *slog.Logger) (*MsgStore, error) {
 	path := filepath.Join(sessionDir, "sent_messages.json")
 	s := &MsgStore{
 		path:       path,
@@ -48,7 +55,11 @@ func NewMsgStore(sessionDir string, windowDays int) (*MsgStore, error) {
 		windowDays: windowDays,
 	}
 	if err := s.load(); err != nil {
-		return nil, err
+		backup := path + ".corrupt"
+		log.Error("sent message store is unreadable; starting with an empty store", "path", path, "moved_to", backup, "err", err)
+		if err := os.Rename(path, backup); err != nil {
+			return nil, fmt.Errorf("moving corrupt msgstore aside: %w", err)
+		}
 	}
 	return s, nil
 }
@@ -76,6 +87,13 @@ func (s *MsgStore) Lookup(messageID string) (SentMessage, bool) {
 	return m, true
 }
 
+// Len returns the number of stored entries (for tests and diagnostics).
+func (s *MsgStore) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.messages)
+}
+
 func (s *MsgStore) expired(m SentMessage) bool {
 	return time.Since(m.SentAt) > time.Duration(s.windowDays)*24*time.Hour
 }
@@ -92,9 +110,8 @@ func (s *MsgStore) load() error {
 	if err := json.Unmarshal(data, &messages); err != nil {
 		return fmt.Errorf("parsing msgstore: %w", err)
 	}
-	cutoff := time.Now().Add(-time.Duration(s.windowDays) * 24 * time.Hour)
 	for _, m := range messages {
-		if m.SentAt.After(cutoff) {
+		if !s.expired(m) {
 			s.messages[m.MessageID] = m
 		}
 	}
@@ -103,10 +120,12 @@ func (s *MsgStore) load() error {
 
 func (s *MsgStore) save() error {
 	messages := make([]SentMessage, 0, len(s.messages))
-	for _, m := range s.messages {
-		if !s.expired(m) {
-			messages = append(messages, m)
+	for id, m := range s.messages {
+		if s.expired(m) {
+			delete(s.messages, id)
+			continue
 		}
+		messages = append(messages, m)
 	}
 	data, err := json.MarshalIndent(messages, "", "  ")
 	if err != nil {
@@ -115,5 +134,5 @@ func (s *MsgStore) save() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0o600)
+	return atomicfile.WriteFile(s.path, data, 0o600)
 }

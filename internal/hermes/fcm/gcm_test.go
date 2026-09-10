@@ -157,7 +157,7 @@ func TestGCMRegister(t *testing.T) {
 		appID := r.PostForm.Get("X-appid")
 		assert.Regexp(t, "^[0-9a-f]{11}$", appID)
 
-		fmt.Fprint(w, "token=test-fcm-token-xyz \n")
+		_, _ = fmt.Fprint(w, "token=test-fcm-token-xyz \n")
 	}))
 	defer srv.Close()
 
@@ -173,7 +173,7 @@ func TestGCMRegister(t *testing.T) {
 
 func TestGCMRegister_Error(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "Error=PHONE_REGISTRATION_ERROR")
+		_, _ = fmt.Fprint(w, "Error=PHONE_REGISTRATION_ERROR")
 	}))
 	defer srv.Close()
 

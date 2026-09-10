@@ -14,12 +14,13 @@ const (
 	AlertSignalRDisconnect AlertType = "signalr_disconnect"
 	AlertIMAPAuthFailure   AlertType = "imap_auth_failure"
 	AlertSessionExpired    AlertType = "session_expired"
+	AlertSMTPFailure       AlertType = "smtp_failure"
 )
 
 // Alerter sends email notifications for operational issues with cooldown
 // to avoid spamming the recipient.
 type Alerter struct {
-	mailer   *Mailer
+	mailer   emailSender
 	to       string
 	cooldown time.Duration
 	log      *slog.Logger
@@ -29,7 +30,7 @@ type Alerter struct {
 }
 
 // NewAlerter creates a new Alerter. Returns nil if alerts are not configured.
-func NewAlerter(cfg AlertsConfig, mailer *Mailer, log *slog.Logger) *Alerter {
+func NewAlerter(cfg AlertsConfig, mailer emailSender, log *slog.Logger) *Alerter {
 	if cfg.Email == "" {
 		return nil
 	}

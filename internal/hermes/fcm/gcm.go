@@ -81,7 +81,7 @@ func gcmCheckin(ctx context.Context, httpClient *http.Client, androidID, securit
 	if err != nil {
 		return 0, 0, fmt.Errorf("gcm checkin: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -127,13 +127,13 @@ func gcmRegister(ctx context.Context, httpClient *http.Client, androidID, securi
 		"cert":   {GarminAPKCertSHA1}, // APK signing certificate SHA1
 
 		// App and GCM version info
-		"app_ver":    {"160500"},                                // App version code (example)
-		"gcm_ver":    {strconv.Itoa(device.GMSVersion)},         // Google Mobile Services version
-		"X-scope":    {"GCM"},                                   // Scope for this registration
-		"X-appid":    {instanceID},                              // Instance ID (11-char hex)
-		"X-osv":      {strconv.Itoa(device.SDKVersion)},         // Android SDK version
-		"X-gmsv":     {strconv.Itoa(device.GMSVersion)},         // GMS version (duplicate for compatibility)
-		"X-cliv":     {"iid-" + device.ChromeVersion},           // Client version (IID library)
+		"app_ver": {"160500"},                        // App version code (example)
+		"gcm_ver": {strconv.Itoa(device.GMSVersion)}, // Google Mobile Services version
+		"X-scope": {"GCM"},                           // Scope for this registration
+		"X-appid": {instanceID},                      // Instance ID (11-char hex)
+		"X-osv":   {strconv.Itoa(device.SDKVersion)}, // Android SDK version
+		"X-gmsv":  {strconv.Itoa(device.GMSVersion)}, // GMS version (duplicate for compatibility)
+		"X-cliv":  {"iid-" + device.ChromeVersion},   // Client version (IID library)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, gcmRegisterURL, strings.NewReader(form.Encode()))
@@ -149,7 +149,7 @@ func gcmRegister(ctx context.Context, httpClient *http.Client, androidID, securi
 	if err != nil {
 		return "", fmt.Errorf("gcm register: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

@@ -30,5 +30,9 @@ RUN addgroup -S relay && adduser -S relay -G relay
 WORKDIR /data
 VOLUME ["/data"]
 
+# Reports unhealthy when the relay has lost its Garmin connection or hung.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["garmin-messenger-relay", "health", "-config", "/data/config.yaml"]
+
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["run", "-config", "/data/config.yaml"]
