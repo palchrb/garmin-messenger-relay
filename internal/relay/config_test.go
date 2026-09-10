@@ -79,6 +79,46 @@ forwarding:
 	}
 }
 
+func TestLoadNormalisesPhonesAndRecipients(t *testing.T) {
+	path := writeConfig(t, `
+garmin:
+  phone: "+47 123 45 678"
+imap:
+  host: imap.gmail.com
+forwarding:
+  default_recipients: ["Ola <ola@example.com>"]
+  allowed_senders: ["+47-123-45-678"]
+  contacts: {"+47 999 99 999": "Kari"}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Garmin.Phone != "+4712345678" || cfg.Forwarding.AllowedSenders[0] != "+4712345678" {
+		t.Errorf("phones not normalised: %q %v", cfg.Garmin.Phone, cfg.Forwarding.AllowedSenders)
+	}
+	if cfg.Forwarding.DefaultRecipients[0] != "ola@example.com" {
+		t.Errorf("recipient not reduced to bare address: %q", cfg.Forwarding.DefaultRecipients[0])
+	}
+	if cfg.Forwarding.Contacts["+4799999999"] != "Kari" {
+		t.Errorf("contacts not normalised: %v", cfg.Forwarding.Contacts)
+	}
+	if cfg.IMAP.AuthservID != "mx.google.com" {
+		t.Errorf("gmail authserv default missing: %q", cfg.IMAP.AuthservID)
+	}
+}
+
+func TestLoadBlankFile(t *testing.T) {
+	path := writeConfig(t, "# nothing here\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("blank config should load defaults: %v", err)
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "garmin.phone") {
+		t.Fatalf("expected field-level validation error, got %v", err)
+	}
+}
+
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	path := writeConfig(t, "garmin:\n  phone: \"+4712345678\"\n  phonee: x\n")
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "phonee") {
@@ -122,6 +162,12 @@ func TestValidateErrors(t *testing.T) {
 			c.IMAP.Password = "p"
 			c.IMAP.ReplyWindowDays = 0
 		}, "reply_window_days"},
+		{"require auth needs authserv", func(c *Config) {
+			c.IMAP.Host = "imap.example.com"
+			c.IMAP.Username = "u"
+			c.IMAP.Password = "p"
+			c.IMAP.RequireAuthenticatedReplies = true
+		}, "authserv_id"},
 		{"bad alert email", func(c *Config) { c.Alerts.Email = "x" }, "alerts.email"},
 		{"bad log level", func(c *Config) { c.Log.Level = "verbose" }, "log.level"},
 	}

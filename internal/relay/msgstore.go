@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,6 +86,18 @@ func (s *MsgStore) Lookup(messageID string) (SentMessage, bool) {
 		return SentMessage{}, false
 	}
 	return m, true
+}
+
+// HasRecipient reports whether any live entry was sent to addr.
+func (s *MsgStore) HasRecipient(addr string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, m := range s.messages {
+		if strings.EqualFold(m.RecipientEmail, addr) && !s.expired(m) {
+			return true
+		}
+	}
+	return false
 }
 
 // Len returns the number of stored entries (for tests and diagnostics).

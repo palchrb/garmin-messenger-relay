@@ -41,11 +41,12 @@ type stateFile struct {
 // been forwarded and when catch-up last succeeded. It lets the relay forward
 // exactly-once across restarts and reconnects.
 type State struct {
-	mu   sync.Mutex
-	path string
-	log  *slog.Logger
-	data stateFile
-	seen map[uuid.UUID]time.Time
+	mu       sync.Mutex
+	path     string
+	log      *slog.Logger
+	data     stateFile
+	seen     map[uuid.UUID]time.Time
+	firstRun bool
 }
 
 // LoadState reads the state file from sessionDir. On first run (no file)
@@ -61,6 +62,7 @@ func LoadState(sessionDir string, log *slog.Logger) (*State, error) {
 	switch {
 	case os.IsNotExist(err):
 		s.data.LastCatchupOK = time.Now()
+		s.firstRun = true
 		return s, s.saveLocked()
 	case err != nil:
 		return nil, fmt.Errorf("reading relay state: %w", err)
@@ -72,6 +74,7 @@ func LoadState(sessionDir string, log *slog.Logger) (*State, error) {
 			return nil, fmt.Errorf("moving corrupt relay state aside: %w", err)
 		}
 		s.data = stateFile{LastCatchupOK: time.Now()}
+		s.firstRun = true
 		return s, s.saveLocked()
 	}
 	if s.data.LastCatchupOK.IsZero() {
@@ -91,13 +94,22 @@ func (s *State) LastCatchupOK() time.Time {
 	return s.data.LastCatchupOK
 }
 
-// SetLastCatchupOK records a successful catch-up pass that started at t.
+// FirstRun reports whether no catch-up pass has completed since the state
+// file was created.
+func (s *State) FirstRun() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.firstRun
+}
+
+// SetLastCatchupOK records the anchor for the next catch-up pass: the start
+// time of a completed pass, or earlier when messages found by that pass are
+// still awaiting delivery.
 func (s *State) SetLastCatchupOK(t time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if t.After(s.data.LastCatchupOK) {
-		s.data.LastCatchupOK = t
-	}
+	s.firstRun = false
+	s.data.LastCatchupOK = t
 	if err := s.saveLocked(); err != nil {
 		s.log.Error("failed to save relay state", "err", err)
 	}

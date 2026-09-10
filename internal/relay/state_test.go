@@ -55,10 +55,10 @@ func TestStateProcessedRoundTripAndPrune(t *testing.T) {
 	if !reloaded.LastCatchupOK().Equal(anchor) {
 		t.Fatalf("last_catchup_ok = %v, want %v", reloaded.LastCatchupOK(), anchor)
 	}
-	// Moving the anchor backwards must be ignored.
+	// The anchor may move backwards when messages are still undelivered.
 	reloaded.SetLastCatchupOK(anchor.Add(-time.Hour))
-	if !reloaded.LastCatchupOK().Equal(anchor) {
-		t.Fatal("anchor moved backwards")
+	if !reloaded.LastCatchupOK().Equal(anchor.Add(-time.Hour)) {
+		t.Fatal("anchor should follow the caller")
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -491,18 +492,13 @@ func (t *loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	// Log request
 	t.logger.Log(context.TODO(), levelTrace, ">>> "+req.Method, "url", req.URL.String())
 	for k, v := range req.Header {
-		val := strings.Join(v, ", ")
-		if len(val) > 120 {
-			t.logger.Log(context.TODO(), levelTrace, "  Request header", "key", k, "value", val[:60]+"..."+val[len(val)-20:])
-		} else {
-			t.logger.Log(context.TODO(), levelTrace, "  Request header", "key", k, "value", val)
-		}
+		t.logger.Log(context.TODO(), levelTrace, "  Request header", "key", k, "value", gm.MaskHeaderValue(k, strings.Join(v, ", ")))
 	}
 	if req.Body != nil && req.Body != http.NoBody {
 		bodyBytes, err := io.ReadAll(req.Body)
 		_ = req.Body.Close()
 		if err == nil {
-			t.logger.Log(context.TODO(), levelTrace, "  Request body", "length", len(bodyBytes), "data", truncate(string(bodyBytes), 2000))
+			t.logger.Log(context.TODO(), levelTrace, "  Request body", "length", len(bodyBytes), "data", truncate(maskFormSecrets(string(bodyBytes)), 2000))
 			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 	}
@@ -517,16 +513,27 @@ func (t *loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	// Log response (read body, log, replace)
 	t.logger.Log(context.TODO(), levelTrace, "<<< Response", "status", resp.StatusCode, "url", req.URL.String())
 	for k, v := range resp.Header {
-		t.logger.Log(context.TODO(), levelTrace, "  Response header", "key", k, "value", strings.Join(v, ", "))
+		t.logger.Log(context.TODO(), levelTrace, "  Response header", "key", k, "value", gm.MaskHeaderValue(k, strings.Join(v, ", ")))
 	}
 	respBody, readErr := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if readErr == nil {
-		t.logger.Log(context.TODO(), levelTrace, "  Response body", "length", len(respBody), "data", truncate(string(respBody), 2000))
+		t.logger.Log(context.TODO(), levelTrace, "  Response body", "length", len(respBody), "data", truncate(maskFormSecrets(string(respBody)), 2000))
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 	}
 
 	return resp, nil
+}
+
+// formSecretRegexp matches token-like fields in form-encoded GCM
+// registration requests and responses.
+var formSecretRegexp = regexp.MustCompile(`(?i)\b(token|securitytoken|security_token|androidid)=[^&\s]+`)
+
+// maskFormSecrets redacts registration tokens in form-encoded bodies and
+// JSON secrets in JSON bodies.
+func maskFormSecrets(s string) string {
+	s = gm.MaskSecrets(s)
+	return formSecretRegexp.ReplaceAllString(s, "$1=[REDACTED]")
 }
 
 // truncate returns the first maxLen characters of s, or s itself if shorter.

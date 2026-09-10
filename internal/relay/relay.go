@@ -33,6 +33,15 @@ const (
 	catchupPageLimit = 50
 	// catchupMaxPages bounds pagination per conversation during catch-up.
 	catchupMaxPages = 3
+	// maxCatchupLookback caps how far back the catch-up window can reach
+	// when undelivered messages keep the anchor from advancing.
+	maxCatchupLookback = 24 * time.Hour
+	// maxDeliveryPasses is how many catch-up passes may retry a message
+	// whose email delivery keeps failing before the relay gives up on it.
+	maxDeliveryPasses = 12
+	// shutdownGrace is how long Run waits for the worker to finish the
+	// message it is handling after ctx is cancelled.
+	shutdownGrace = 30 * time.Second
 	// disconnectAlertAfter is how long SignalR may stay disconnected before
 	// an alert email is sent.
 	disconnectAlertAfter = 5 * time.Minute
@@ -44,6 +53,14 @@ const (
 	// stageTimeout bounds a single network stage (media download, one SMTP
 	// send, one Garmin API call).
 	stageTimeout = 60 * time.Second
+	// transcodeTimeout bounds one ffmpeg run.
+	transcodeTimeout = 2 * time.Minute
+	// noticeCooldown is the minimum time between failure notices to the
+	// same address.
+	noticeCooldown = 10 * time.Minute
+	// ffmpegMaxPixels caps the decoded image size so a tiny compressed file
+	// cannot expand into a multi-gigabyte frame.
+	ffmpegMaxPixels = "50000000"
 )
 
 // retryDelays are the waits between successive attempts of a send. Three
@@ -53,6 +70,7 @@ var retryDelays = []time.Duration{10 * time.Second, 30 * time.Second}
 // emailSender abstracts the SMTP mailer so it can be faked in tests.
 type emailSender interface {
 	Send(Message) error
+	SendContext(context.Context, Message) error
 }
 
 // Relay listens for incoming Garmin messages, forwards them via email,
@@ -72,6 +90,16 @@ type Relay struct {
 	inbox     chan gm.MessageModel
 	catchupCh chan struct{}
 	connected atomic.Bool
+
+	// noticeMu guards noticeSent, a per-address cooldown for failure notices
+	// so the relay cannot be used as a mail reflector.
+	noticeMu   sync.Mutex
+	noticeSent map[string]time.Time
+
+	// deliveryFailures counts total delivery failures per message; worker
+	// goroutine only.
+	deliveryFailures map[uuid.UUID]int
+	workerDone       chan struct{}
 }
 
 // New creates a new Relay. Call Run() to start it.
@@ -100,17 +128,20 @@ func New(cfg *Config, log *slog.Logger) (*Relay, error) {
 	}
 
 	r := &Relay{
-		cfg:       cfg,
-		auth:      auth,
-		api:       api,
-		sr:        sr,
-		mailer:    mailer,
-		store:     store,
-		state:     state,
-		alerter:   NewAlerter(cfg.Alerts, mailer, log),
-		log:       log,
-		inbox:     make(chan gm.MessageModel, inboxSize),
-		catchupCh: make(chan struct{}, 1),
+		cfg:              cfg,
+		auth:             auth,
+		api:              api,
+		sr:               sr,
+		mailer:           mailer,
+		store:            store,
+		state:            state,
+		alerter:          NewAlerter(cfg.Alerts, mailer, log),
+		log:              log,
+		inbox:            make(chan gm.MessageModel, inboxSize),
+		catchupCh:        make(chan struct{}, 1),
+		noticeSent:       make(map[string]time.Time),
+		deliveryFailures: make(map[uuid.UUID]int),
+		workerDone:       make(chan struct{}),
 	}
 
 	if cfg.IMAPEnabled() {
@@ -200,6 +231,15 @@ func (r *Relay) Run(ctx context.Context) error {
 
 	err := r.sr.Start(ctx)
 	r.setConnected(false)
+
+	// Let the worker finish the message it is on so an email that was
+	// just sent is also recorded as processed.
+	select {
+	case <-r.workerDone:
+	case <-time.After(shutdownGrace):
+		r.log.Warn("worker did not finish within shutdown grace period")
+	}
+
 	if err != nil && ctx.Err() == nil {
 		return fmt.Errorf("SignalR: %w", err)
 	}
@@ -261,6 +301,7 @@ func (r *Relay) triggerCatchup() {
 // worker is the single consumer of the inbox. Serialising here keeps emails
 // in order and makes the processed set single-writer.
 func (r *Relay) worker(ctx context.Context) {
+	defer close(r.workerDone)
 	for {
 		select {
 		case <-ctx.Done():
@@ -311,7 +352,13 @@ func messageTime(m gm.MessageModel) time.Time {
 // and enqueues any message the relay has not processed yet.
 func (r *Relay) runCatchup(ctx context.Context) error {
 	started := time.Now()
-	windowStart := r.state.LastCatchupOK().Add(-catchupMargin)
+	windowStart := r.state.LastCatchupOK()
+	if !r.state.FirstRun() {
+		// On the very first pass the anchor is "now" and everything before
+		// it was handled by whatever ran previously; looking back would
+		// re-send emails. Later passes overlap to absorb delayed receipt.
+		windowStart = windowStart.Add(-catchupMargin)
+	}
 	r.log.Debug("catch-up pass starting", "since", windowStart)
 
 	cctx, cancel := context.WithTimeout(ctx, stageTimeout)
@@ -352,7 +399,21 @@ func (r *Relay) runCatchup(ctx context.Context) error {
 		}
 	}
 
-	r.state.SetLastCatchupOK(started)
+	// The anchor must not move past a message that is still unprocessed
+	// (e.g. SMTP down), otherwise a later pass would no longer find it. It
+	// is capped so one poison message cannot pin the window forever; the
+	// worker gives up on such a message after maxDeliveryPasses.
+	anchor := started
+	if len(pending) > 0 {
+		oldest := messageTime(pending[0])
+		if oldest.Before(anchor) {
+			anchor = oldest
+		}
+		if floor := started.Add(-maxCatchupLookback); anchor.Before(floor) {
+			anchor = floor
+		}
+	}
+	r.state.SetLastCatchupOK(anchor)
 	return nil
 }
 
@@ -360,6 +421,7 @@ func (r *Relay) runCatchup(ctx context.Context) error {
 // since, paginating backwards a bounded number of times.
 func (r *Relay) fetchConversationSince(ctx context.Context, convID uuid.UUID, since time.Time) ([]gm.MessageModel, error) {
 	var out []gm.MessageModel
+	seen := make(map[uuid.UUID]struct{})
 	var olderThan *uuid.UUID
 	for page := 0; page < catchupMaxPages; page++ {
 		opts := []gm.GetConversationDetailOption{gm.WithDetailLimit(catchupPageLimit)}
@@ -375,22 +437,28 @@ func (r *Relay) fetchConversationSince(ctx context.Context, convID uuid.UUID, si
 		if len(detail.Messages) == 0 {
 			break
 		}
-		oldest := time.Now()
-		for _, cm := range detail.Messages {
+		// Do not assume the page order: find the oldest message on the
+		// page and paginate from it.
+		var oldest time.Time
+		var oldestID uuid.UUID
+		for i, cm := range detail.Messages {
 			m := cm.ToMessageModel(convID)
 			t := messageTime(m)
-			if t.Before(oldest) {
-				oldest = t
+			if i == 0 || t.Before(oldest) {
+				oldest, oldestID = t, m.MessageID
 			}
+			if _, dup := seen[m.MessageID]; dup {
+				continue // pages overlap or the server ignored olderThanId
+			}
+			seen[m.MessageID] = struct{}{}
 			if !t.IsZero() && t.After(since) {
 				out = append(out, m)
 			}
 		}
-		if oldest.Before(since) || len(detail.Messages) < catchupPageLimit {
+		if oldest.IsZero() || oldest.Before(since) || (olderThan != nil && oldestID == *olderThan) {
 			break
 		}
-		last := detail.Messages[len(detail.Messages)-1].MessageID
-		olderThan = &last
+		olderThan = &oldestID
 	}
 	return out, nil
 }
@@ -431,9 +499,13 @@ func (r *Relay) handleReply(ctx context.Context, reply InboundReply) {
 	sent, ok := r.store.Lookup(reply.InReplyTo)
 	if !ok {
 		r.log.Info("Reply to unknown/expired message, ignoring", "in_reply_to", reply.InReplyTo, "from", reply.From)
-		r.notifyReplyFailure(reply, fmt.Sprintf(
-			"The message you replied to is unknown to the relay or older than %d days, so the reply cannot be routed to the inReach.",
-			r.cfg.IMAP.ReplyWindowDays))
+		// Only people the relay has actually emailed get a notice; anyone
+		// else could be forging the reply to bounce mail off the relay.
+		if r.isKnownRecipient(reply.From) {
+			r.notifyReplyFailure(reply, fmt.Sprintf(
+				"The message you replied to is unknown to the relay or older than %d days, so the reply cannot be routed to the inReach.",
+				r.cfg.IMAP.ReplyWindowDays))
+		}
 		return
 	}
 
@@ -458,12 +530,30 @@ func (r *Relay) handleReply(ctx context.Context, reply InboundReply) {
 	var failures []string
 	captionSent := false
 	for _, att := range reply.Attachments {
+		// Transcoding is deterministic, so it is done once and only the
+		// upload is retried.
+		media, err := transcodeAttachment(ctx, att)
+		if err != nil {
+			r.log.Error("failed to transcode attachment", "filename", att.Filename, "err", err)
+			failures = append(failures, fmt.Sprintf("%s: %v", att.Filename, err))
+			continue
+		}
 		c := ""
 		if !captionSent {
 			c = caption
 		}
-		err := r.withRetry(ctx, "send attachment to Garmin", func(ctx context.Context) error {
-			return r.forwardAttachmentToGarmin(ctx, to, att, c)
+		// Fixed IDs across attempts: a retry after an ambiguous failure
+		// (timeout after Garmin accepted) must not become a second paid
+		// satellite message.
+		opts, err := idempotentSendOptions()
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", att.Filename, err))
+			continue
+		}
+		opts = append(opts, media.opts...)
+		err = r.withRetry(ctx, "send attachment to Garmin", func(ctx context.Context) error {
+			_, err := r.api.SendMediaMessage(ctx, to, c, media.data, media.mediaType, opts...)
+			return err
 		})
 		if err != nil {
 			r.log.Error("failed to forward attachment to Garmin", "filename", att.Filename, "err", err)
@@ -478,10 +568,13 @@ func (r *Relay) handleReply(ctx context.Context, reply InboundReply) {
 	// Send the text on its own when there were no attachments or all of
 	// them failed.
 	if !captionSent && caption != "" {
-		err := r.withRetry(ctx, "send reply to Garmin", func(ctx context.Context) error {
-			_, err := r.api.SendMessage(ctx, to, caption)
-			return err
-		})
+		opts, err := idempotentSendOptions()
+		if err == nil {
+			err = r.withRetry(ctx, "send reply to Garmin", func(ctx context.Context) error {
+				_, err := r.api.SendMessage(ctx, to, caption, opts...)
+				return err
+			})
+		}
 		if err != nil {
 			r.log.Error("failed to send reply text to Garmin", "err", err)
 			failures = append(failures, fmt.Sprintf("text: %v", err))
@@ -497,6 +590,20 @@ func (r *Relay) handleReply(ctx context.Context, reply InboundReply) {
 		r.notifyReplyFailure(reply, "Parts of your reply could not be delivered to the inReach:\n\n  - "+
 			strings.Join(failures, "\n  - "))
 	}
+}
+
+// idempotentSendOptions returns SendMessage options that pin the message,
+// OTA and media IDs so that every retry of one logical send carries the
+// same identifiers.
+func idempotentSendOptions() ([]gm.SendMessageOption, error) {
+	otaUUID, err := gm.GenerateOTAUUID()
+	if err != nil {
+		return nil, fmt.Errorf("generating OTA UUID: %w", err)
+	}
+	return []gm.SendMessageOption{
+		gm.WithMessageUUID(uuid.New(), otaUUID),
+		gm.WithMediaID(uuid.New()),
+	}, nil
 }
 
 // buildReplyCaption composes the text sent to the inReach: the sender's name
@@ -516,17 +623,40 @@ func buildReplyCaption(reply InboundReply) string {
 	return truncateRunes(sender+": "+caption, maxReplyChars)
 }
 
+// isKnownRecipient reports whether the relay has ever addressed email to
+// addr: a configured recipient, the alert address, or a recipient of a
+// forwarded message still in the store.
+func (r *Relay) isKnownRecipient(addr string) bool {
+	for _, d := range r.cfg.Forwarding.DefaultRecipients {
+		if strings.EqualFold(d, addr) {
+			return true
+		}
+	}
+	if r.cfg.Alerts.Email != "" && strings.EqualFold(r.cfg.Alerts.Email, addr) {
+		return true
+	}
+	return r.store.HasRecipient(addr)
+}
+
 // notifyReplyFailure emails the replier about a reply that could not be
 // delivered. The notice's Message-ID deliberately lacks the relay marker so
-// that replies to it are ignored.
+// that replies to it are ignored, the subject is fixed rather than echoed,
+// and each address gets at most one notice per cooldown period.
 func (r *Relay) notifyReplyFailure(reply InboundReply, reason string) {
-	subject := "Re: " + reply.Subject
-	if reply.Subject == "" {
-		subject = "Your reply could not be delivered"
+	addr := strings.ToLower(reply.From)
+	r.noticeMu.Lock()
+	last, seen := r.noticeSent[addr]
+	if seen && time.Since(last) < noticeCooldown {
+		r.noticeMu.Unlock()
+		r.log.Info("failure notice suppressed (cooldown)", "to", reply.From)
+		return
 	}
+	r.noticeSent[addr] = time.Now()
+	r.noticeMu.Unlock()
+
 	msg := Message{
 		To:        []string{reply.From},
-		Subject:   subject,
+		Subject:   "Your reply could not be delivered to the inReach",
 		InReplyTo: reply.MessageID,
 		MessageID: fmt.Sprintf("<notice-%08x-%08x@garmin-messenger-relay.local>", rand.Uint32(), rand.Uint32()),
 		Body: "This is an automatic notice from garmin-messenger-relay.\n\n" +
@@ -558,36 +688,42 @@ func (r *Relay) withRetry(ctx context.Context, what string, op func(context.Cont
 	}
 }
 
-// forwardAttachmentToGarmin transcodes an inbound email attachment to a
-// Garmin-compatible format and sends it via the Hermes API.
-// The caption is included as the message body (visible on Garmin devices).
-func (r *Relay) forwardAttachmentToGarmin(ctx context.Context, to []string, att InboundAttachment, caption string) error {
+// transcodedMedia is an attachment converted to a Garmin-native format.
+type transcodedMedia struct {
+	data      []byte
+	mediaType gm.MediaType
+	opts      []gm.SendMessageOption
+}
+
+// transcodeAttachment converts an inbound email attachment to a
+// Garmin-compatible format (AVIF for images, OGG Opus for audio).
+func transcodeAttachment(ctx context.Context, att InboundAttachment) (*transcodedMedia, error) {
+	tctx, cancel := context.WithTimeout(ctx, transcodeTimeout)
+	defer cancel()
+
 	ct := strings.ToLower(att.ContentType)
 	switch {
 	case strings.HasPrefix(ct, "image/"):
-		avif, err := transcodeImageToAVIF(ctx, att.Data)
+		avif, err := transcodeImageToAVIF(tctx, att.Data)
 		if err != nil {
-			return fmt.Errorf("transcoding image to AVIF: %w", err)
+			return nil, fmt.Errorf("transcoding image to AVIF: %w", err)
 		}
-		_, err = r.api.SendMediaMessage(ctx, to, caption, avif, gm.MediaTypeImageAvif)
-		return err
+		return &transcodedMedia{data: avif, mediaType: gm.MediaTypeImageAvif}, nil
 
 	case strings.HasPrefix(ct, "audio/"):
-		ogg, err := transcodeAudioToOGG(ctx, att.Data)
+		ogg, err := transcodeAudioToOGG(tctx, att.Data)
 		if err != nil {
-			return fmt.Errorf("transcoding audio to OGG: %w", err)
+			return nil, fmt.Errorf("transcoding audio to OGG: %w", err)
 		}
-		durationMs, _ := getAudioDurationMs(ctx, ogg)
-		var opts []gm.SendMessageOption
-		if durationMs > 0 {
-			ms := int(durationMs)
-			opts = append(opts, gm.WithMediaMetadata(gm.MediaMetadata{DurationMs: &ms}))
+		m := &transcodedMedia{data: ogg, mediaType: gm.MediaTypeAudioOgg}
+		if durationMs, _ := getAudioDurationMs(tctx, ogg); durationMs > 0 {
+			ms := durationMs
+			m.opts = append(m.opts, gm.WithMediaMetadata(gm.MediaMetadata{DurationMs: &ms}))
 		}
-		_, err = r.api.SendMediaMessage(ctx, to, caption, ogg, gm.MediaTypeAudioOgg, opts...)
-		return err
+		return m, nil
 
 	default:
-		return fmt.Errorf("unsupported attachment type %q", att.ContentType)
+		return nil, fmt.Errorf("unsupported attachment type %q", att.ContentType)
 	}
 }
 
@@ -648,8 +784,8 @@ func (r *Relay) processMessage(ctx context.Context, msg gm.MessageModel) {
 			MessageID:   msgID,
 			Attachments: attachments,
 		}
-		err := r.withRetry(ctx, "send email to "+recipient, func(context.Context) error {
-			return r.mailer.Send(email)
+		err := r.withRetry(ctx, "send email to "+recipient, func(ctx context.Context) error {
+			return r.mailer.SendContext(ctx, email)
 		})
 		if err != nil {
 			r.log.Error("Failed to send email", "error", err, "recipient", recipient, "msg_id", msg.MessageID)
@@ -671,15 +807,31 @@ func (r *Relay) processMessage(ctx context.Context, msg gm.MessageModel) {
 	}
 
 	if len(delivered) == 0 {
-		// Nothing went out: leave the message unprocessed so the next
-		// catch-up pass retries it, and tell the operator.
+		r.deliveryFailures[msg.MessageID]++
+		passes := r.deliveryFailures[msg.MessageID]
+		if passes < maxDeliveryPasses {
+			// Nothing went out: leave the message unprocessed so the next
+			// catch-up pass retries it, and tell the operator.
+			r.alerter.Send(AlertSMTPFailure,
+				"Email delivery failed",
+				fmt.Sprintf("A Garmin message from %s could not be emailed to %s after %d attempts.\n"+
+					"The relay will retry on the next catch-up pass (%d of %d).\n\nSubject: %s",
+					derefStr(msg.From), strings.Join(failed, ", "), len(retryDelays)+1, passes, maxDeliveryPasses, subject))
+			return
+		}
+		// Giving up keeps one undeliverable message from pinning the
+		// catch-up window and re-alerting forever.
+		r.log.Error("giving up on message after repeated delivery failures", "msg_id", msg.MessageID, "passes", passes)
+		delete(r.deliveryFailures, msg.MessageID)
+		r.state.MarkProcessed(msg.MessageID)
 		r.alerter.Send(AlertSMTPFailure,
-			"Email delivery failed",
-			fmt.Sprintf("A Garmin message from %s could not be emailed to %s after %d attempts.\n"+
-				"The relay will retry on the next catch-up pass.\n\nSubject: %s",
-				derefStr(msg.From), strings.Join(failed, ", "), len(retryDelays)+1, subject))
+			"Giving up on undeliverable message",
+			fmt.Sprintf("A Garmin message from %s could not be emailed to %s in %d catch-up passes and will not be retried.\n\n"+
+				"Subject: %s\nMessage ID: %s\n\nThe message is still in Garmin Messenger.",
+				derefStr(msg.From), strings.Join(failed, ", "), passes, subject, msg.MessageID))
 		return
 	}
+	delete(r.deliveryFailures, msg.MessageID)
 
 	r.log.Info("Email forwarded", "recipients", delivered, "subject", subject)
 	if len(failed) > 0 {
@@ -892,6 +1044,7 @@ func transcodeImageToAVIF(ctx context.Context, data []byte) ([]byte, error) {
 
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
+		"-max_pixels", ffmpegMaxPixels,
 		"-i", "pipe:0",
 		"-vf", "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease:flags=lanczos",
 		"-c:v", "libaom-av1",

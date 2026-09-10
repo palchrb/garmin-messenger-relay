@@ -230,7 +230,9 @@ Anyone who knows the Garmin number can message it, and by default every message 
 - `forwarding.allowed_senders`: only forward messages from these phone numbers. Recommended when the relay serves your own devices.
 - `forwarding.caption_routing_allowlist`: only let caption routing deliver to these addresses or `@domains`. Without it, anyone allowed to send can make the relay email arbitrary addresses from your account, which is why `caption_routing` is off by default.
 
-For the reply direction, `imap.require_authenticated_replies: true` drops replies your mail provider could not verify with DKIM or DMARC, which defeats forged `From` headers. Replies that fail DMARC are always dropped.
+For the reply direction, `imap.require_authenticated_replies: true` only accepts replies your own mail provider verified (DMARC pass, or a DKIM signature by the sender's domain). It needs `imap.authserv_id`, the identifier your provider writes into `Authentication-Results` headers (`mx.google.com` for Gmail, set automatically when the IMAP host is `imap.gmail.com`), because senders can add such headers themselves and only the provider's own are trusted. Replies whose trusted header reports a DMARC failure are always dropped.
+
+Repliers only receive delivery-failure notices if the relay has emailed them before, at most one per 10 minutes, so the relay cannot be used to bounce mail to strangers.
 
 ### Gmail setup
 
@@ -309,7 +311,28 @@ Replies are validated with multiple checks to prevent spam or accidental forward
 
 ### Linux (systemd)
 
-A systemd service file is included in the repository.
+`install.sh` sets everything up and is safe to re-run for upgrades: it creates the `garmin-relay` user, installs the binary and a hardened unit file, writes an example config on first run (never overwriting an existing one), and restarts the service if it was running.
+
+```bash
+git clone https://github.com/palchrb/garmin-messenger-relay.git
+cd garmin-messenger-relay
+
+sudo ./install.sh                         # build from source (needs Go 1.24+)
+sudo ./install.sh --version v1.2.3        # or download that release (verifies SHA256SUMS)
+sudo ./install.sh --binary ./garmin-messenger-relay-linux-amd64   # or use a binary you already have
+
+# First time only: edit the config, then log in and check as the service user
+sudoedit /opt/garmin-messenger-relay/config.yaml
+sudo -u garmin-relay /opt/garmin-messenger-relay/garmin-messenger-relay login -config /opt/garmin-messenger-relay/config.yaml
+sudo -u garmin-relay /opt/garmin-messenger-relay/garmin-messenger-relay status -config /opt/garmin-messenger-relay/config.yaml
+sudo systemctl start garmin-messenger-relay
+sudo journalctl -u garmin-messenger-relay -f
+```
+
+`ffmpeg` must be installed on the host for media transcoding (`apt install ffmpeg`). To upgrade, pull and run `install.sh` again.
+
+<details>
+<summary>Manual setup without the script</summary>
 
 ```bash
 # Create a dedicated user
@@ -333,6 +356,8 @@ sudo systemctl enable --now garmin-messenger-relay
 sudo systemctl status garmin-messenger-relay
 sudo journalctl -u garmin-messenger-relay -f
 ```
+
+</details>
 
 ### Windows (Task Scheduler)
 
@@ -402,6 +427,17 @@ Requires `protoc` (Protocol Buffers compiler) to be installed.
 - **ffmpeg** (runtime): Required for transcoding email attachments to Garmin-compatible formats. Included in the Docker image.
 - **SMTP server**: For sending forwarded messages (Gmail, Office 365, Fastmail, etc.)
 - **IMAP server** (optional): For receiving email replies. Supports IDLE (push) with automatic fallback to polling.
+
+## Upgrading from earlier versions
+
+Behaviour that changed on purpose; check your config after upgrading:
+
+- `forwarding.caption_routing` now defaults to **off**. Set it to `true` explicitly if you rely on it, and consider `caption_routing_allowlist`.
+- With `smtp.tls: starttls` the relay refuses to send if the server does not offer STARTTLS instead of falling back to plaintext. Use `tls: ssl` or, for a trusted LAN relay, `tls: none`.
+- Unknown config keys are rejected, and phone numbers must be E.164 (spaces and dashes are removed for you).
+- The IMAP client now picks up unread replies from the last `reply_window_days` on start, not only mail arriving after start, so replies received while the relay was down are delivered.
+- Two new files live in `session_dir`: `relay_state.json` (forwarded-message memory and catch-up anchor) and `health.json`. The directory must be writable by the relay user.
+- On the first start after upgrading, the catch-up anchor is set to that moment, so nothing older is re-sent.
 
 ## License
 

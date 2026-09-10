@@ -34,8 +34,15 @@ imap:
   password: "your-app-password"
   reply_window_days: 7     # ignore replies to relay emails older than this
   max_attachment_mb: 5     # reject inbound attachments larger than this
-  # Only accept replies your mail provider has verified (DKIM/DMARC pass).
-  # Recommended when the reply address is not under your control.
+  # Identifier your provider writes in Authentication-Results headers, so the
+  # relay can tell its verdict apart from headers a sender may have forged.
+  # Gmail: mx.google.com (default when host is imap.gmail.com).
+  # Fastmail: mx*.messagingengine.com -> use "messagingengine.com".
+  # Look at the raw headers of any email in the inbox to find yours.
+  authserv_id: ""
+  # Only accept replies your provider verified (DMARC pass, or DKIM pass for
+  # the From domain). Recommended when replies come from people you do not
+  # control. Requires authserv_id.
   require_authenticated_replies: false
 
 forwarding:

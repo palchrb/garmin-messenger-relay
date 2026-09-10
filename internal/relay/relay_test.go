@@ -35,6 +35,8 @@ func (f *fakeSender) Send(m Message) error {
 	return nil
 }
 
+func (f *fakeSender) SendContext(_ context.Context, m Message) error { return f.Send(m) }
+
 func (f *fakeSender) messages() []Message {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -90,17 +92,20 @@ func newTestRelay(t *testing.T, cfg *Config, handler http.Handler) (*Relay, *fak
 	}
 	sender := &fakeSender{}
 	r := &Relay{
-		cfg:       cfg,
-		auth:      auth,
-		api:       gm.NewHermesAPI(auth),
-		sr:        gm.NewHermesSignalR(auth),
-		mailer:    sender,
-		store:     store,
-		state:     state,
-		alerter:   NewAlerter(cfg.Alerts, sender, testLogger()),
-		log:       testLogger(),
-		inbox:     make(chan gm.MessageModel, inboxSize),
-		catchupCh: make(chan struct{}, 1),
+		cfg:              cfg,
+		auth:             auth,
+		api:              gm.NewHermesAPI(auth),
+		sr:               gm.NewHermesSignalR(auth),
+		mailer:           sender,
+		store:            store,
+		state:            state,
+		alerter:          NewAlerter(cfg.Alerts, sender, testLogger()),
+		log:              testLogger(),
+		inbox:            make(chan gm.MessageModel, inboxSize),
+		catchupCh:        make(chan struct{}, 1),
+		noticeSent:       make(map[string]time.Time),
+		deliveryFailures: make(map[uuid.UUID]int),
+		workerDone:       make(chan struct{}),
 	}
 	return r, sender
 }
@@ -315,17 +320,18 @@ func TestRunCatchupEnqueuesUnprocessedForeignMessages(t *testing.T) {
 	if got[0].ConversationID.String() != "a1b2c3d4-e5f6-7890-abcd-ef1234567890" {
 		t.Fatalf("conversation id not propagated: %s", got[0].ConversationID)
 	}
-	if time.Since(r.state.LastCatchupOK()) > time.Minute {
-		t.Fatal("successful catch-up should advance the anchor")
-	}
 
-	// A second pass after processing must not enqueue it again.
+	// A second pass after processing must not enqueue it again, and with
+	// nothing pending the anchor advances to now.
 	r.state.MarkProcessed(got[0].MessageID)
 	if err := r.runCatchup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(r.inbox) != 0 {
 		t.Fatal("processed message re-enqueued")
+	}
+	if time.Since(r.state.LastCatchupOK()) > time.Minute {
+		t.Fatal("catch-up with nothing pending should advance the anchor")
 	}
 }
 
@@ -356,12 +362,26 @@ func TestHandleReplyRoutesTextToGarmin(t *testing.T) {
 		t.Fatal("mismatched sender must be ignored silently")
 	}
 
-	// Unknown Message-ID: replier gets a notice threaded to their email.
+	// Unknown Message-ID from a stranger: no notice (mail reflector guard).
+	r.handleReply(context.Background(), InboundReply{InReplyTo: "<gmr-unknown@x>", From: "stranger@example.net", MessageID: "<s1@example.net>", Subject: "spam", TextBody: "late"})
+	if len(sender.messages()) != 0 {
+		t.Fatal("unknown senders must not receive notices")
+	}
+
+	// Unknown Message-ID from a known recipient: notice threaded to their
+	// email, with a fixed subject and no relay marker.
 	r.handleReply(context.Background(), InboundReply{InReplyTo: "<gmr-unknown@x>", From: "alice@example.com", MessageID: "<r1@example.com>", Subject: "Re: hi", TextBody: "late"})
 	notices := sender.messages()
-	if len(notices) != 1 || notices[0].InReplyTo != "<r1@example.com>" || strings.Contains(notices[0].MessageID, "gmr-") {
-		t.Fatalf("expected a failure notice without the relay marker, got %+v", notices)
+	if len(notices) != 1 || notices[0].InReplyTo != "<r1@example.com>" || strings.Contains(notices[0].MessageID, "gmr-") || strings.Contains(notices[0].Subject, "hi") {
+		t.Fatalf("expected a failure notice without the relay marker or echoed subject, got %+v", notices)
 	}
+
+	// Second notice to the same address within the cooldown is suppressed.
+	r.handleReply(context.Background(), InboundReply{InReplyTo: "<gmr-unknown@x>", From: "alice@example.com", MessageID: "<r1b@example.com>", TextBody: "late again"})
+	if len(sender.messages()) != 1 {
+		t.Fatal("notice cooldown not applied")
+	}
+	r.noticeSent = map[string]time.Time{}
 
 	// Reply with only an unsupported attachment: notice lists it.
 	r.handleReply(context.Background(), InboundReply{InReplyTo: "<gmr-1@x>", From: "alice@example.com", MessageID: "<r2@example.com>", SkippedAttachments: []string{"doc.pdf (unsupported type application/pdf)"}})
@@ -384,4 +404,93 @@ func TestEnqueueDropsWhenFull(t *testing.T) {
 	}
 	r.triggerCatchup()
 	r.triggerCatchup() // must not block
+}
+
+func TestHandleReplyRetriesWithSameUUID(t *testing.T) {
+	cfg := testConfig(t)
+	var sends []gm.SendMessageRequest
+	var mu sync.Mutex
+	calls := 0
+	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if req.Method == "POST" && req.URL.Path == "/Message/Send" {
+			var body gm.SendMessageRequest
+			_ = json.NewDecoder(req.Body).Decode(&body)
+			sends = append(sends, body)
+			calls++
+			if calls == 1 {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			_, _ = w.Write(fixture(t, "send_message_response.json"))
+			return
+		}
+		w.WriteHeader(404)
+	})
+	r, _ := newTestRelay(t, cfg, handler)
+	if err := r.store.Add(SentMessage{MessageID: "<gmr-1@x>", SenderPhone: "+15551234567", RecipientEmail: "alice@example.com", SentAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	r.handleReply(context.Background(), InboundReply{InReplyTo: "<gmr-1@x>", From: "alice@example.com", TextBody: "hi"})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sends) != 2 {
+		t.Fatalf("expected a retry, got %d sends", len(sends))
+	}
+	if sends[0].UUID == nil || sends[1].UUID == nil || *sends[0].UUID != *sends[1].UUID || *sends[0].OtaUuid != *sends[1].OtaUuid {
+		t.Fatal("retry must reuse the message UUIDs so Garmin can deduplicate")
+	}
+}
+
+func TestRunCatchupAnchorStaysBehindUndelivered(t *testing.T) {
+	cfg := testConfig(t)
+	r, _ := newTestRelay(t, cfg, hermesHandler(t, nil, nil))
+	// Pretend a pass completed earlier so the margin applies.
+	r.state.SetLastCatchupOK(time.Date(2025, 1, 15, 9, 0, 0, 0, time.UTC))
+
+	if err := r.runCatchup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture message (2025-01-15T10:30Z) is enqueued but not yet
+	// delivered, so the anchor must not move past it. The 24h lookback cap
+	// applies since the fixture is old.
+	anchor := r.state.LastCatchupOK()
+	if anchor.After(time.Now().Add(-maxCatchupLookback + time.Minute)) {
+		t.Fatalf("anchor advanced past undelivered message: %v", anchor)
+	}
+	if r.state.FirstRun() {
+		t.Fatal("state should no longer be first-run")
+	}
+}
+
+func TestRunCatchupFirstRunUsesNoMargin(t *testing.T) {
+	cfg := testConfig(t)
+	r, _ := newTestRelay(t, cfg, hermesHandler(t, nil, nil))
+	if !r.state.FirstRun() {
+		t.Fatal("fresh state should be first-run")
+	}
+	if err := r.runCatchup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.inbox) != 0 {
+		t.Fatal("first run must not backfill history")
+	}
+}
+
+func TestProcessMessageGivesUpAfterMaxPasses(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Forwarding.DefaultRecipients = []string{"a@example.com"}
+	r, sender := newTestRelay(t, cfg, hermesHandler(t, nil, nil))
+	msg := gm.MessageModel{MessageID: uuid.New(), ConversationID: uuid.New(), From: strPtr("+15551234567"), MessageBody: strPtr("x")}
+	for i := 0; i < maxDeliveryPasses; i++ {
+		sender.failNext = len(retryDelays) + 1
+		r.processMessage(context.Background(), msg)
+		if i < maxDeliveryPasses-1 && r.state.IsProcessed(msg.MessageID) {
+			t.Fatalf("gave up too early on pass %d", i+1)
+		}
+	}
+	if !r.state.IsProcessed(msg.MessageID) {
+		t.Fatal("message should be marked processed after giving up")
+	}
 }

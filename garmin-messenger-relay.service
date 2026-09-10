@@ -9,7 +9,8 @@ User=garmin-relay
 Group=garmin-relay
 WorkingDirectory=/opt/garmin-messenger-relay
 ExecStart=/opt/garmin-messenger-relay/garmin-messenger-relay run -config /opt/garmin-messenger-relay/config.yaml
-Restart=on-failure
+# The relay exits non-zero on purpose when Garmin refuses to reconnect.
+Restart=always
 RestartSec=10
 
 # Security hardening

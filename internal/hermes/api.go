@@ -185,6 +185,8 @@ type sendMessageParams struct {
 	mediaType       *MediaType
 	mediaMetadata   *MediaMetadata
 	parentMessageID *uuid.UUID
+	msgUUID         *uuid.UUID
+	otaUUID         *uuid.UUID
 }
 
 // WithUserLocation sets the sender's location.
@@ -207,9 +209,20 @@ func WithIsPost(p bool) SendMessageOption {
 	return func(params *sendMessageParams) { params.isPost = p }
 }
 
-// withMediaID sets the media ID (internal use).
-func withMediaID(id uuid.UUID) SendMessageOption {
+// WithMediaID sets the media ID. SendMediaMessage generates one when not
+// given; pass the same ID on retries so Garmin can deduplicate.
+func WithMediaID(id uuid.UUID) SendMessageOption {
 	return func(p *sendMessageParams) { p.mediaID = &id }
+}
+
+// WithMessageUUID sets the client-generated message UUID and OTA UUID.
+// SendMessage generates fresh ones when not given. Retrying a send with the
+// same UUIDs lets Garmin treat it as the same message instead of a new one.
+func WithMessageUUID(msgUUID, otaUUID uuid.UUID) SendMessageOption {
+	return func(p *sendMessageParams) {
+		p.msgUUID = &msgUUID
+		p.otaUUID = &otaUUID
+	}
 }
 
 // withMediaType sets the media type (internal use).
@@ -235,9 +248,18 @@ func (api *HermesAPI) SendMessage(ctx context.Context, to []string, body string,
 	}
 
 	msgUUID := uuid.New()
-	otaUUID, err := GenerateOTAUUID()
-	if err != nil {
-		return nil, fmt.Errorf("generating OTA UUID: %w", err)
+	if params.msgUUID != nil {
+		msgUUID = *params.msgUUID
+	}
+	var otaUUID uuid.UUID
+	if params.otaUUID != nil {
+		otaUUID = *params.otaUUID
+	} else {
+		var err error
+		otaUUID, err = GenerateOTAUUID()
+		if err != nil {
+			return nil, fmt.Errorf("generating OTA UUID: %w", err)
+		}
 	}
 
 	req := SendMessageRequest{
@@ -420,8 +442,14 @@ func (api *HermesAPI) UpdateMedia(ctx context.Context, req UpdateMediaRequest) (
 
 // SendMediaMessage sends a message with a media attachment (convenience method).
 func (api *HermesAPI) SendMediaMessage(ctx context.Context, to []string, body string, fileData []byte, mediaType MediaType, opts ...SendMessageOption) (*SendMessageV2Response, error) {
-	mediaID := uuid.New()
-	opts = append(opts, withMediaID(mediaID), withMediaType(mediaType))
+	params := &sendMessageParams{}
+	for _, opt := range opts {
+		opt(params)
+	}
+	if params.mediaID == nil {
+		opts = append(opts, WithMediaID(uuid.New()))
+	}
+	opts = append(opts, withMediaType(mediaType))
 	result, err := api.SendMessage(ctx, to, body, opts...)
 	if err != nil {
 		return nil, err

@@ -197,28 +197,33 @@ func (sr *HermesSignalR) Start(ctx context.Context) error {
 				return fmt.Errorf("waiting for SignalR connection: %w", errOrTimeout(client.Err()))
 			}
 
-		case <-stateCh:
-			// Notifications may arrive out of order; always read the live state.
-			cur := client.State()
-			ev := classifyTransition(prev, cur)
-			prev = cur
-			switch ev {
-			case eventOpen:
-				connectedOnce = true
-				sr.logger.Debug("SignalR connected")
-				if sr.onOpen != nil {
-					sr.onOpen()
+		case st := <-stateCh:
+			// Handle the delivered state first so a quick
+			// Connected->Connecting->Connected cycle is not coalesced away
+			// (which would skip the reconnect catch-up), then reconcile
+			// with the live state in case notifications arrived out of
+			// order.
+			for _, cur := range []signalr.ClientState{st, client.State()} {
+				ev := classifyTransition(prev, cur)
+				prev = cur
+				switch ev {
+				case eventOpen:
+					connectedOnce = true
+					sr.logger.Debug("SignalR connected")
+					if sr.onOpen != nil {
+						sr.onOpen()
+					}
+				case eventClose:
+					sr.logger.Warn("SignalR connection lost, reconnecting", "error", client.Err())
+					if sr.onClose != nil {
+						sr.onClose()
+					}
+				case eventClosed:
+					if ctx.Err() != nil {
+						return nil
+					}
+					return fmt.Errorf("SignalR client closed permanently: %w", errOrTimeout(client.Err()))
 				}
-			case eventClose:
-				sr.logger.Warn("SignalR connection lost, reconnecting", "error", client.Err())
-				if sr.onClose != nil {
-					sr.onClose()
-				}
-			case eventClosed:
-				if ctx.Err() != nil {
-					return nil
-				}
-				return fmt.Errorf("SignalR client closed permanently: %w", errOrTimeout(client.Err()))
 			}
 		}
 	}

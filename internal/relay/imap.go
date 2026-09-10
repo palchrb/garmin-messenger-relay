@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"html"
 	"io"
 	"log/slog"
+	"net/textproto"
 	"regexp"
 	"strings"
 	"time"
@@ -18,10 +20,15 @@ import (
 	"github.com/emersion/go-message/mail"
 )
 
-// relayMessageIDMarker is the substring present in every Message-ID the relay
-// generates for forwarded Garmin messages. The IMAP search is scoped to
-// replies carrying it, so the relay never touches unrelated mail.
-const relayMessageIDMarker = "gmr-"
+// relayMessageIDRegexp is the exact shape of a Message-ID the relay generates
+// for forwarded Garmin messages:
+// <gmr-CONVERSATION-MESSAGE-RANDOM@garmin-messenger-relay.local>.
+// Only replies referencing such an ID are ever read from the inbox.
+var relayMessageIDRegexp = regexp.MustCompile(`^<gmr-[0-9a-f-]{36}-[0-9a-f-]{36}-[0-9a-f]{8}@garmin-messenger-relay\.local>$`)
+
+// maxAttachmentsPerReply bounds how many media files one reply may turn
+// into satellite messages.
+const maxAttachmentsPerReply = 3
 
 // InboundReply holds the parsed content of an email reply from a recipient.
 type InboundReply struct {
@@ -68,9 +75,14 @@ type IMAPClient struct {
 	Replies chan InboundReply
 
 	newMsg chan struct{} // notified by UnilateralDataHandler when EXISTS arrives
-	// since bounds the search window. Replies older than this cannot match a
-	// stored message anyway, so there is no point fetching them.
+	// since bounds the first search on a connection. Replies older than this
+	// cannot match a stored message anyway, so there is no point fetching them.
 	since time.Time
+	// lastUID is the highest UID examined on the current connection; later
+	// searches only look above it. Reset on every new connection because
+	// UIDs are only stable within a UIDVALIDITY epoch. Accessed from the
+	// connection goroutine only.
+	lastUID imap.UID
 }
 
 // NewIMAPClient creates a new IMAPClient. Call Start to begin listening.
@@ -170,6 +182,7 @@ func (c *IMAPClient) run(ctx context.Context) error {
 	}
 	defer func() { _ = client.Close() }()
 	c.log.Info("IMAP connected", "host", c.cfg.Host)
+	c.lastUID = 0
 
 	// Pick up replies that arrived while the relay was not running.
 	if err := c.fetchUnseenReplies(ctx, client); err != nil {
@@ -259,21 +272,26 @@ func (c *IMAPClient) runPoll(ctx context.Context, client *imapclient.Client) err
 	}
 }
 
-// fetchUnseenReplies retrieves unseen replies to relay emails, parses them,
-// dispatches InboundReply values to the Replies channel, and marks them as
-// seen. Only messages whose In-Reply-To header references a relay Message-ID
-// are searched, so unrelated mail in the inbox is never read or flagged.
+// fetchUnseenReplies finds unseen replies to relay emails, marks them as
+// seen, parses them and dispatches InboundReply values to the Replies
+// channel.
 //
-// Messages are flagged \Seen once they have been handed to the reply channel,
-// before the reply is delivered to Garmin. A crash in between loses the reply
-// rather than risking a duplicate satellite message.
+// The server is asked only for unseen messages (newer than the last UID
+// handled on this connection, or within the reply window on the first pass)
+// and only the In-Reply-To header of those is fetched. Full bodies are
+// fetched for the messages that reply to a relay email, so unrelated mail is
+// never read or flagged. Server-side HEADER searches are avoided because
+// some providers (Gmail) match whole tokens only.
+//
+// Replies are flagged \Seen before they are handed over for delivery. A
+// crash in between loses the reply rather than risking a duplicate paid
+// satellite message.
 func (c *IMAPClient) fetchUnseenReplies(ctx context.Context, client *imapclient.Client) error {
-	criteria := &imap.SearchCriteria{
-		NotFlag: []imap.Flag{imap.FlagSeen},
-		Since:   c.since,
-		Header: []imap.SearchCriteriaHeaderField{
-			{Key: "In-Reply-To", Value: relayMessageIDMarker},
-		},
+	criteria := &imap.SearchCriteria{NotFlag: []imap.Flag{imap.FlagSeen}}
+	if c.lastUID > 0 {
+		criteria.UID = []imap.UIDSet{{imap.UIDRange{Start: c.lastUID + 1, Stop: 0}}}
+	} else {
+		criteria.Since = c.since
 	}
 	searchData, err := client.UIDSearch(criteria, nil).Wait()
 	if err != nil {
@@ -281,19 +299,32 @@ func (c *IMAPClient) fetchUnseenReplies(ctx context.Context, client *imapclient.
 	}
 	uids := searchData.AllUIDs()
 	if len(uids) == 0 {
-		c.log.Debug("No unseen relay replies in INBOX")
+		c.log.Debug("No new unseen messages in INBOX")
 		return nil
 	}
-	c.log.Info("Found unseen relay replies", "count", len(uids))
 
-	uidSet := imap.UIDSetNum(uids...)
+	// Phase 1: In-Reply-To headers only.
+	candidates, maxUID, err := c.findRelayReplies(client, uids)
+	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 {
+		c.log.Debug("No unseen relay replies in INBOX", "unseen", len(uids))
+		c.lastUID = maxUID
+		return nil
+	}
+	c.log.Info("Found unseen relay replies", "count", len(candidates))
+
+	// Phase 2: full bodies of the candidates.
+	candidateSet := imap.UIDSetNum(candidates...)
 	fetchOptions := &imap.FetchOptions{
 		UID: true,
 		BodySection: []*imap.FetchItemBodySection{
 			{Peek: true}, // BODY.PEEK[] — fetch whole message without setting \Seen
 		},
 	}
-	messages := client.Fetch(uidSet, fetchOptions)
+	var replies []InboundReply
+	messages := client.Fetch(candidateSet, fetchOptions)
 	for {
 		msg := messages.Next()
 		if msg == nil {
@@ -307,29 +338,96 @@ func (c *IMAPClient) fetchUnseenReplies(ctx context.Context, client *imapclient.
 		if reply == nil {
 			continue
 		}
-		c.log.Info("Parsed inbound reply", "from", reply.From, "in_reply_to", reply.InReplyTo, "authenticated", reply.Authenticated)
-		select {
-		case c.Replies <- *reply:
-		case <-ctx.Done():
-			return nil
-		}
+		replies = append(replies, *reply)
 	}
 	if err := messages.Close(); err != nil {
-		return err
+		return fmt.Errorf("IMAP UID FETCH: %w", err)
 	}
 
-	// Mark the fetched replies as seen so they are not processed again.
+	// Mark the candidates as seen before dispatching.
 	storeFlags := &imap.StoreFlags{
 		Op:     imap.StoreFlagsAdd,
 		Flags:  []imap.Flag{imap.FlagSeen},
 		Silent: true,
 	}
-	return client.Store(uidSet, storeFlags, nil).Close()
+	if err := client.Store(candidateSet, storeFlags, nil).Close(); err != nil {
+		return fmt.Errorf("IMAP UID STORE: %w", err)
+	}
+	c.lastUID = maxUID
+
+	for _, reply := range replies {
+		c.log.Info("Parsed inbound reply", "from", reply.From, "in_reply_to", reply.InReplyTo, "authenticated", reply.Authenticated)
+		select {
+		case c.Replies <- reply:
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	return nil
+}
+
+// findRelayReplies fetches only the In-Reply-To header of the given
+// messages and returns the UIDs that reply to a relay email, plus the
+// highest UID examined.
+func (c *IMAPClient) findRelayReplies(client *imapclient.Client, uids []imap.UID) ([]imap.UID, imap.UID, error) {
+	var maxUID imap.UID
+	for _, u := range uids {
+		if u > maxUID {
+			maxUID = u
+		}
+	}
+	fetchOptions := &imap.FetchOptions{
+		UID: true,
+		BodySection: []*imap.FetchItemBodySection{{
+			Specifier:    imap.PartSpecifierHeader,
+			HeaderFields: []string{"In-Reply-To"},
+			Peek:         true,
+		}},
+	}
+	var candidates []imap.UID
+	messages := client.Fetch(imap.UIDSetNum(uids...), fetchOptions)
+	for {
+		msg := messages.Next()
+		if msg == nil {
+			break
+		}
+		var uid imap.UID
+		var inReplyTo string
+		for {
+			item := msg.Next()
+			if item == nil {
+				break
+			}
+			switch it := item.(type) {
+			case imapclient.FetchItemDataUID:
+				uid = it.UID
+			case imapclient.FetchItemDataBodySection:
+				raw, err := io.ReadAll(io.LimitReader(it.Literal, 64*1024))
+				if err != nil {
+					continue
+				}
+				hdr, err := textproto.NewReader(bufio.NewReader(bytes.NewReader(append(raw, '\r', '\n')))).ReadMIMEHeader()
+				if err != nil && len(hdr) == 0 {
+					continue
+				}
+				inReplyTo = hdr.Get("In-Reply-To")
+			}
+		}
+		if uid != 0 && firstRelayMessageID(inReplyTo) != "" {
+			candidates = append(candidates, uid)
+		}
+	}
+	if err := messages.Close(); err != nil {
+		return nil, 0, fmt.Errorf("IMAP UID FETCH headers: %w", err)
+	}
+	return candidates, maxUID, nil
 }
 
 // parseMessage extracts an InboundReply from a fetched IMAP message.
 // Returns nil, nil if the message should be ignored.
 func (c *IMAPClient) parseMessage(msg *imapclient.FetchMessageData) (*InboundReply, error) {
+	maxBytes := int64(c.cfg.MaxAttachmentMB) * 1024 * 1024
+
 	// Read the body section immediately — the literal reader is invalidated
 	// once msg.Next() is called again (stream-based protocol).
 	var bodyData []byte
@@ -339,10 +437,18 @@ func (c *IMAPClient) parseMessage(msg *imapclient.FetchMessageData) (*InboundRep
 			break
 		}
 		if bs, ok := item.(imapclient.FetchItemDataBodySection); ok {
+			// Bound memory: a reply can never usefully be larger than the
+			// attachments it may carry (base64 inflates by 4/3) plus text.
+			limit := maxBytes*maxAttachmentsPerReply*4/3 + 1024*1024
 			var err error
-			bodyData, err = io.ReadAll(bs.Literal)
+			bodyData, err = io.ReadAll(io.LimitReader(bs.Literal, limit+1))
 			if err != nil {
 				return nil, fmt.Errorf("reading message body: %w", err)
+			}
+			if int64(len(bodyData)) > limit {
+				// Drain the rest so the protocol stream stays in sync.
+				_, _ = io.Copy(io.Discard, bs.Literal)
+				return nil, fmt.Errorf("message larger than %d bytes, skipping", limit)
 			}
 		}
 	}
@@ -350,13 +456,23 @@ func (c *IMAPClient) parseMessage(msg *imapclient.FetchMessageData) (*InboundRep
 		return nil, fmt.Errorf("no body section")
 	}
 
-	maxBytes := int64(c.cfg.MaxAttachmentMB) * 1024 * 1024
-	return parseReply(bytes.NewReader(bodyData), maxBytes, c.cfg.RequireAuthenticatedReplies, c.log)
+	return parseReply(bytes.NewReader(bodyData), maxBytes, replyAuthPolicy{
+		authservID: c.cfg.AuthservID,
+		require:    c.cfg.RequireAuthenticatedReplies,
+	}, c.log)
+}
+
+// replyAuthPolicy controls how Authentication-Results headers are judged.
+type replyAuthPolicy struct {
+	// authservID identifies the trusted header; empty trusts none for
+	// passes but still honours explicit DMARC failures from any header.
+	authservID string
+	require    bool
 }
 
 // parseReply parses a raw RFC 5322 message into an InboundReply. It is
 // separated from the IMAP transport so it can be unit-tested.
-func parseReply(r io.Reader, maxAttachmentBytes int64, requireAuth bool, log *slog.Logger) (*InboundReply, error) {
+func parseReply(r io.Reader, maxAttachmentBytes int64, policy replyAuthPolicy, log *slog.Logger) (*InboundReply, error) {
 	mr, err := mail.CreateReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("parsing mail: %w", err)
@@ -371,16 +487,18 @@ func parseReply(r io.Reader, maxAttachmentBytes int64, requireAuth bool, log *sl
 		log.Debug("Skipping non-reply email (no In-Reply-To header)", "from", fromHeader, "subject", subject)
 		return nil, nil
 	}
-	// Only process replies to emails we sent.
-	if !strings.Contains(inReplyTo, relayMessageIDMarker) {
-		log.Debug("Skipping reply to non-relay email", "in_reply_to", inReplyTo, "from", fromHeader, "subject", subject)
+	// Only process replies to emails we sent. The In-Reply-To may list
+	// several IDs; use the first relay-shaped one.
+	inReplyTo = firstRelayMessageID(inReplyTo)
+	if inReplyTo == "" {
+		log.Debug("Skipping reply to non-relay email", "in_reply_to", header.Get("In-Reply-To"), "from", fromHeader, "subject", subject)
 		return nil, nil
 	}
 
 	// Never react to automatic responses (out-of-office, bounces), which
 	// would otherwise turn into satellite messages.
-	if v := strings.ToLower(strings.TrimSpace(header.Get("Auto-Submitted"))); v != "" && v != "no" {
-		log.Info("Skipping auto-submitted reply", "auto_submitted", v, "from", fromHeader)
+	if reason := autoResponseReason(header); reason != "" {
+		log.Info("Skipping automatic reply", "reason", reason, "from", fromHeader)
 		return nil, nil
 	}
 
@@ -389,13 +507,13 @@ func parseReply(r io.Reader, maxAttachmentBytes int64, requireAuth bool, log *sl
 		return nil, fmt.Errorf("missing From header")
 	}
 
-	auth := authenticationVerdict(header.Values("Authentication-Results"))
+	auth := authenticationVerdict(header.Values("Authentication-Results"), policy.authservID, from[0].Address)
 	switch {
 	case auth == authFail:
 		log.Warn("Rejecting reply that failed sender authentication (DMARC)", "from", from[0].Address)
 		return nil, nil
-	case requireAuth && auth != authPass:
-		log.Warn("Rejecting reply without DKIM/DMARC pass (require_authenticated_replies is on)", "from", from[0].Address)
+	case policy.require && auth != authPass:
+		log.Warn("Rejecting reply without DKIM/DMARC pass from the trusted authserv-id (require_authenticated_replies is on)", "from", from[0].Address, "authserv_id", policy.authservID)
 		return nil, nil
 	}
 
@@ -467,9 +585,44 @@ func isMediaType(ct string) bool {
 	return strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "audio/")
 }
 
+// firstRelayMessageID returns the first ID in an In-Reply-To value that has
+// the exact shape of a relay Message-ID, or "".
+func firstRelayMessageID(inReplyTo string) string {
+	for _, id := range strings.Fields(inReplyTo) {
+		if relayMessageIDRegexp.MatchString(id) {
+			return id
+		}
+	}
+	return ""
+}
+
+// autoResponseReason reports why a message looks like an automatic reply
+// (vacation responder, bounce, list traffic), or "" if it looks human.
+func autoResponseReason(h mail.Header) string {
+	if v := strings.ToLower(strings.TrimSpace(h.Get("Auto-Submitted"))); v != "" && v != "no" {
+		return "Auto-Submitted: " + v
+	}
+	if v := strings.ToLower(strings.TrimSpace(h.Get("Precedence"))); v == "bulk" || v == "junk" || v == "list" || v == "auto_reply" {
+		return "Precedence: " + v
+	}
+	if v := strings.TrimSpace(h.Get("X-Auto-Response-Suppress")); v != "" {
+		return "X-Auto-Response-Suppress: " + v
+	}
+	if v := strings.TrimSpace(h.Get("X-Autoreply")); v != "" {
+		return "X-Autoreply: " + v
+	}
+	return ""
+}
+
 // readAttachment reads a MIME part into the reply's attachment list,
-// enforcing the size limit.
+// enforcing the size and count limits.
 func readAttachment(reply *InboundReply, body io.Reader, filename, ct string, maxBytes int64, log *slog.Logger) {
+	if len(reply.Attachments) >= maxAttachmentsPerReply {
+		log.Info("too many attachments, skipping", "filename", filename, "max", maxAttachmentsPerReply)
+		reply.SkippedAttachments = append(reply.SkippedAttachments,
+			fmt.Sprintf("%s (at most %d attachments per reply)", filename, maxAttachmentsPerReply))
+		return
+	}
 	if !isMediaType(ct) {
 		log.Info("ignoring unsupported attachment type", "filename", filename, "content_type", ct)
 		reply.SkippedAttachments = append(reply.SkippedAttachments, fmt.Sprintf("%s (unsupported type %s)", filename, ct))
@@ -506,17 +659,61 @@ const (
 	authFail
 )
 
-// authenticationVerdict inspects Authentication-Results headers as added by
-// the receiving mail provider. A DMARC failure is treated as a spoofed
-// sender; DKIM or DMARC pass means the From domain vouched for the message.
-func authenticationVerdict(headers []string) authVerdict {
+var authResultTokenRegexp = regexp.MustCompile(`(?i)\b(dmarc|dkim)=(pass|fail)\b|\bheader\.(?:d|i)=([^\s;]+)`)
+
+// authenticationVerdict inspects Authentication-Results headers (RFC 8601).
+//
+// Only headers whose authserv-id matches the configured one are trusted for
+// a pass, because a sender can add Authentication-Results headers of their
+// own and providers only strip the ones claiming the provider's own
+// identifier. A pass requires dmarc=pass, or dkim=pass where the signing
+// domain (header.d/header.i) is the From domain or a parent of it, since a
+// DKIM signature by an unrelated domain says nothing about From.
+//
+// A dmarc=fail is honoured from a trusted header, and, when no authserv-id
+// is configured, from any header: a sender gains nothing by forging a
+// failure.
+func authenticationVerdict(headers []string, authservID, fromAddr string) authVerdict {
+	fromDomain := ""
+	if i := strings.LastIndex(fromAddr, "@"); i >= 0 {
+		fromDomain = strings.ToLower(fromAddr[i+1:])
+	}
 	verdict := authUnknown
 	for _, h := range headers {
 		l := strings.ToLower(h)
-		if strings.Contains(l, "dmarc=fail") {
+		id := l
+		if i := strings.IndexAny(l, "; "); i >= 0 {
+			id = l[:i]
+		}
+		id = strings.TrimSpace(id)
+		trusted := authservID != "" && (id == authservID || strings.HasSuffix(id, "."+authservID))
+
+		dmarc, dkim, signer := "", "", ""
+		for _, m := range authResultTokenRegexp.FindAllStringSubmatch(l, -1) {
+			switch {
+			case m[1] == "dmarc":
+				dmarc = m[2]
+			case m[1] == "dkim":
+				dkim = m[2]
+			case m[3] != "":
+				signer = strings.TrimPrefix(m[3], "@")
+				if i := strings.LastIndex(signer, "@"); i >= 0 {
+					signer = signer[i+1:]
+				}
+			}
+		}
+
+		if dmarc == "fail" && (trusted || authservID == "") {
 			return authFail
 		}
-		if strings.Contains(l, "dkim=pass") || strings.Contains(l, "dmarc=pass") {
+		if !trusted {
+			continue
+		}
+		if dmarc == "pass" {
+			verdict = authPass
+		}
+		if dkim == "pass" && signer != "" && fromDomain != "" &&
+			(signer == fromDomain || strings.HasSuffix(fromDomain, "."+signer)) {
 			verdict = authPass
 		}
 	}

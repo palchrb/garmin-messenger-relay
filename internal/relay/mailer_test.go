@@ -2,10 +2,12 @@ package relay
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeSMTP is a minimal SMTP server that records one delivery.
@@ -167,5 +169,34 @@ func TestBuildRawTextOnlyAndThreading(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("missing %q in:\n%s", want, s)
 		}
+	}
+}
+
+func TestMailerHonoursContextDeadline(t *testing.T) {
+	// A server that accepts the connection and never speaks.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer func() { _ = c.Close() }()
+		}
+	}()
+	m := NewMailer(SMTPConfig{Host: "127.0.0.1", Port: ln.Addr().(*net.TCPAddr).Port, From: "relay@example.com", TLS: "none"})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = m.SendContext(ctx, Message{To: []string{"bob@example.com"}, Subject: "x", Body: "y"})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("send hung for %v despite deadline", time.Since(start))
 	}
 }

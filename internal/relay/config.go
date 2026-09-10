@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net/mail"
 	"os"
 	"path/filepath"
@@ -69,10 +71,17 @@ type IMAPConfig struct {
 	// MaxAttachmentMB is the maximum size in MB of an inbound media attachment.
 	// Defaults to 5.
 	MaxAttachmentMB int `yaml:"max_attachment_mb"`
+	// AuthservID is the authentication service identifier your mail provider
+	// writes into Authentication-Results headers (e.g. "mx.google.com" for
+	// Gmail). Only headers carrying this identifier are trusted; senders
+	// can add their own Authentication-Results headers, which must be
+	// ignored. Defaults to "mx.google.com" when host is imap.gmail.com.
+	AuthservID string `yaml:"authserv_id"`
 	// RequireAuthenticatedReplies, when true, only accepts replies whose
-	// Authentication-Results header (added by your mail provider) shows
-	// dkim=pass or dmarc=pass. This defeats From-header spoofing. When false
-	// (default) replies are still rejected if the header reports dmarc=fail.
+	// trusted Authentication-Results header shows dmarc=pass, or dkim=pass
+	// for the From domain. This defeats From-header spoofing. Requires
+	// AuthservID. When false (default) replies are still rejected if the
+	// trusted header reports dmarc=fail.
 	RequireAuthenticatedReplies bool `yaml:"require_authenticated_replies"`
 }
 
@@ -176,7 +185,7 @@ func Load(path string) (*Config, error) {
 
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
-	if err := dec.Decode(&cfg); err != nil {
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parsing config file %s: %w", path, err)
 	}
 
@@ -203,14 +212,31 @@ func Load(path string) (*Config, error) {
 // normalize trims whitespace and lower-cases values that are compared
 // case-insensitively elsewhere.
 func normalize(cfg *Config) {
-	cfg.Garmin.Phone = strings.TrimSpace(cfg.Garmin.Phone)
+	cfg.Garmin.Phone = normalizePhone(cfg.Garmin.Phone)
 	cfg.SMTP.TLS = strings.ToLower(strings.TrimSpace(cfg.SMTP.TLS))
 	cfg.Log.Level = strings.ToLower(strings.TrimSpace(cfg.Log.Level))
 	for i, r := range cfg.Forwarding.DefaultRecipients {
-		cfg.Forwarding.DefaultRecipients[i] = strings.TrimSpace(r)
+		r = strings.TrimSpace(r)
+		// Store bare addresses so reply From matching works with
+		// "Name <addr>" entries too.
+		if addr, err := mail.ParseAddress(r); err == nil {
+			r = addr.Address
+		}
+		cfg.Forwarding.DefaultRecipients[i] = r
+	}
+	cfg.IMAP.AuthservID = strings.ToLower(strings.TrimSpace(cfg.IMAP.AuthservID))
+	if cfg.IMAP.AuthservID == "" && strings.EqualFold(cfg.IMAP.Host, "imap.gmail.com") {
+		cfg.IMAP.AuthservID = "mx.google.com"
 	}
 	for i, s := range cfg.Forwarding.AllowedSenders {
-		cfg.Forwarding.AllowedSenders[i] = strings.TrimSpace(s)
+		cfg.Forwarding.AllowedSenders[i] = normalizePhone(s)
+	}
+	if len(cfg.Forwarding.Contacts) > 0 {
+		contacts := make(map[string]string, len(cfg.Forwarding.Contacts))
+		for phone, name := range cfg.Forwarding.Contacts {
+			contacts[normalizePhone(phone)] = strings.TrimSpace(name)
+		}
+		cfg.Forwarding.Contacts = contacts
 	}
 	for i, a := range cfg.Forwarding.CaptionRoutingAllowlist {
 		cfg.Forwarding.CaptionRoutingAllowlist[i] = strings.ToLower(strings.TrimSpace(a))
@@ -297,6 +323,9 @@ func (c *Config) Validate() error {
 		if c.IMAP.MaxAttachmentMB <= 0 {
 			return fmt.Errorf("imap.max_attachment_mb must be greater than 0 (got %d)", c.IMAP.MaxAttachmentMB)
 		}
+		if c.IMAP.RequireAuthenticatedReplies && c.IMAP.AuthservID == "" {
+			return fmt.Errorf("imap.require_authenticated_replies needs imap.authserv_id (the identifier your provider writes in Authentication-Results headers, e.g. mx.google.com)")
+		}
 	}
 
 	if c.Alerts.Email != "" {
@@ -314,6 +343,18 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("log.level must be one of: trace, debug, info, warn, error (got %q)", c.Log.Level)
 	}
 	return nil
+}
+
+// normalizePhone removes the spaces, hyphens and parentheses people write
+// in phone numbers so "+47 123 45 678" becomes "+4712345678".
+func normalizePhone(p string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '-', '(', ')', '.':
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(p))
 }
 
 func validPort(field string, port int) error {
@@ -412,8 +453,15 @@ imap:
   password: "your-app-password"
   reply_window_days: 7     # ignore replies to relay emails older than this
   max_attachment_mb: 5     # reject inbound attachments larger than this
-  # Only accept replies your mail provider has verified (DKIM/DMARC pass).
-  # Recommended when the reply address is not under your control.
+  # Identifier your provider writes in Authentication-Results headers, so the
+  # relay can tell its verdict apart from headers a sender may have forged.
+  # Gmail: mx.google.com (default when host is imap.gmail.com).
+  # Fastmail: mx*.messagingengine.com -> use "messagingengine.com".
+  # Look at the raw headers of any email in the inbox to find yours.
+  authserv_id: ""
+  # Only accept replies your provider verified (DMARC pass, or DKIM pass for
+  # the From domain). Recommended when replies come from people you do not
+  # control. Requires authserv_id.
   require_authenticated_replies: false
 
 forwarding:

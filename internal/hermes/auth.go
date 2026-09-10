@@ -568,8 +568,16 @@ func checkResponse(resp *http.Response) error {
 // even at trace level: trace output is routinely pasted into bug reports.
 var secretJSONFields = []string{
 	"access_token", "accessToken", "refresh_token", "refreshToken",
-	"verificationCode", "pnsHandle", "securityToken",
+	"verificationCode", "pnsHandle", "securityToken", "mapSharePassword",
+	// Presigned S3 upload/download credentials.
+	"policy", "xAmzSignature", "x-amz-signature", "uploadUrl", "url",
 }
+
+// MaskSecrets is maskSecrets for use by sibling packages.
+func MaskSecrets(s string) string { return maskSecrets(s) }
+
+// MaskHeaderValue is maskHeaderValue for use by sibling packages.
+func MaskHeaderValue(key, val string) string { return maskHeaderValue(key, val) }
 
 // maskSecrets replaces the values of known secret fields in a JSON document
 // with a redaction marker. The input is treated as text, so it also works on
@@ -617,7 +625,7 @@ func maskJSONField(s, field string) string {
 // of the value to recognise its shape.
 func maskHeaderValue(key, val string) string {
 	switch strings.ToLower(key) {
-	case "authorization", "registrationapikey":
+	case "authorization", "registrationapikey", "set-cookie", "cookie":
 		if len(val) > 16 {
 			return val[:10] + "...[REDACTED]"
 		}

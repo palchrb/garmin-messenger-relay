@@ -2,18 +2,24 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
+	"net"
 	"net/mail"
 	"net/smtp"
 	"net/textproto"
 	"strings"
 	"time"
 )
+
+// smtpTimeout bounds one SMTP session when the caller's context has no
+// earlier deadline, so a black-holed server cannot hang the sender.
+const smtpTimeout = 60 * time.Second
 
 // Mailer sends emails via SMTP.
 type Mailer struct {
@@ -46,8 +52,14 @@ type Message struct {
 	InReplyTo string
 }
 
-// Send sends the message to all recipients.
+// Send sends the message to all recipients with a default timeout.
 func (m *Mailer) Send(msg Message) error {
+	return m.SendContext(context.Background(), msg)
+}
+
+// SendContext sends the message to all recipients. The whole SMTP session
+// is bounded by ctx's deadline, or smtpTimeout when it has none.
+func (m *Mailer) SendContext(ctx context.Context, msg Message) error {
 	if len(msg.To) == 0 {
 		return fmt.Errorf("no recipients")
 	}
@@ -57,7 +69,7 @@ func (m *Mailer) Send(msg Message) error {
 		return fmt.Errorf("building email: %w", err)
 	}
 
-	c, err := m.connect()
+	c, err := m.connect(ctx)
 	if err != nil {
 		return err
 	}
@@ -69,7 +81,7 @@ func (m *Mailer) Send(msg Message) error {
 // Ping checks that the SMTP server is reachable, negotiates the configured
 // encryption and accepts authentication. It does not send any email.
 func (m *Mailer) Ping() error {
-	c, err := m.connect()
+	c, err := m.connect(context.Background())
 	if err != nil {
 		return err
 	}
@@ -78,34 +90,44 @@ func (m *Mailer) Ping() error {
 }
 
 // connect dials the SMTP server according to the configured TLS mode and
-// authenticates. The caller must Close the returned client.
-func (m *Mailer) connect() (*smtp.Client, error) {
+// authenticates. The caller must Close the returned client. Every read and
+// write on the connection is subject to the session deadline.
+func (m *Mailer) connect(ctx context.Context) (*smtp.Client, error) {
 	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
 	tlsCfg := &tls.Config{ServerName: m.cfg.Host, MinVersion: tls.VersionTLS12}
 
-	var c *smtp.Client
-	switch m.cfg.TLS {
-	case "ssl":
-		conn, err := tls.Dial("tcp", addr, tlsCfg)
-		if err != nil {
-			return nil, fmt.Errorf("TLS dial %s: %w", addr, err)
-		}
-		c, err = smtp.NewClient(conn, m.cfg.Host)
-		if err != nil {
-			_ = conn.Close()
-			return nil, fmt.Errorf("SMTP client: %w", err)
-		}
+	deadline := time.Now().Add(smtpTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	dialer := &net.Dialer{Deadline: deadline}
 
-	case "starttls":
-		var err error
-		c, err = smtp.Dial(addr)
-		if err != nil {
-			return nil, fmt.Errorf("dialing %s: %w", addr, err)
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("dialing %s: %w", addr, err)
+	}
+	_ = conn.SetDeadline(deadline)
+
+	if m.cfg.TLS == "ssl" {
+		tconn := tls.Client(conn, tlsCfg)
+		if err := tconn.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("TLS handshake with %s: %w", addr, err)
 		}
-		if err := c.Hello("localhost"); err != nil {
-			_ = c.Close()
-			return nil, fmt.Errorf("EHLO: %w", err)
-		}
+		conn = tconn
+	}
+
+	c, err := smtp.NewClient(conn, m.cfg.Host)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("SMTP client: %w", err)
+	}
+	if err := c.Hello("localhost"); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("EHLO: %w", err)
+	}
+
+	if m.cfg.TLS == "starttls" {
 		if ok, _ := c.Extension("STARTTLS"); !ok {
 			_ = c.Close()
 			return nil, fmt.Errorf("server %s does not offer STARTTLS; refusing to continue unencrypted (set smtp.tls to \"ssl\" or, for a trusted local relay, \"none\")", addr)
@@ -113,17 +135,6 @@ func (m *Mailer) connect() (*smtp.Client, error) {
 		if err := c.StartTLS(tlsCfg); err != nil {
 			_ = c.Close()
 			return nil, fmt.Errorf("STARTTLS: %w", err)
-		}
-
-	default: // "none"
-		var err error
-		c, err = smtp.Dial(addr)
-		if err != nil {
-			return nil, fmt.Errorf("dialing %s: %w", addr, err)
-		}
-		if err := c.Hello("localhost"); err != nil {
-			_ = c.Close()
-			return nil, fmt.Errorf("EHLO: %w", err)
 		}
 	}
 
