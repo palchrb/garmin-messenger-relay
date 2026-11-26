@@ -289,7 +289,7 @@ garmin-messenger-relay.exe login
 
 ## Build from source
 
-Requires Go 1.24+ and ffmpeg (runtime dependency for media transcoding).
+Requires Go 1.27+ and ffmpeg (runtime dependency for media transcoding).
 
 ```bash
 git clone https://github.com/palchrb/garmin-messenger-relay.git
