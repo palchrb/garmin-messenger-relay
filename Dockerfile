@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 go build \
     ./cmd/garmin-messenger-relay
 
 # Runtime stage
-FROM alpine:3.21
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates ffmpeg tzdata su-exec
 
