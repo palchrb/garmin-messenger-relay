@@ -1,0 +1,11 @@
+version: "2"
+
+linters:
+  exclusions:
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      # Bare channel receives used to wait for a goroutine to finish.
+      - linters: [errcheck]
+        text: "^Error return value is not checked$"

@@ -195,9 +195,10 @@ func (sr *HermesSignalR) connect(ctx context.Context, hubURL string) (signalr.Co
 		wsURL.RawQuery = q.Encode()
 	}
 
-	if wsURL.Scheme == "https" {
+	switch wsURL.Scheme {
+	case "https":
 		wsURL.Scheme = "wss"
-	} else if wsURL.Scheme == "http" {
+	case "http":
 		wsURL.Scheme = "ws"
 	}
 

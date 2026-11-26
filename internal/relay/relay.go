@@ -372,12 +372,12 @@ func (r *Relay) buildEmailBody(msg gm.MessageModel) string {
 		ts = *msg.SentAt
 	}
 
-	sb.WriteString(fmt.Sprintf("From: %s\n", from))
+	fmt.Fprintf(&sb, "From: %s\n", from)
 
 	// Caption / text body
 	caption := derefStr(msg.MessageBody)
 	if caption != "" && r.cfg.Forwarding.ForwardText {
-		sb.WriteString(fmt.Sprintf("Caption: %s\n", caption))
+		fmt.Fprintf(&sb, "Caption: %s\n", caption)
 	} else {
 		sb.WriteString("Caption: (empty)\n")
 	}
@@ -389,18 +389,18 @@ func (r *Relay) buildEmailBody(msg gm.MessageModel) string {
 		lon := derefFloat64(loc.LongitudeDegrees)
 
 		if lat != 0 || lon != 0 {
-			sb.WriteString(fmt.Sprintf("Location: %.6f, %.6f\n", lat, lon))
-			sb.WriteString(fmt.Sprintf("Map: https://www.openstreetmap.org/?mlat=%.6f&mlon=%.6f#map=14/%.6f/%.6f&layers=P\n",
-				lat, lon, lat, lon))
+			fmt.Fprintf(&sb, "Location: %.6f, %.6f\n", lat, lon)
+			fmt.Fprintf(&sb, "Map: https://www.openstreetmap.org/?mlat=%.6f&mlon=%.6f#map=14/%.6f/%.6f&layers=P\n",
+				lat, lon, lat, lon)
 		}
 
 		if alt := derefFloat64(loc.ElevationMeters); alt != 0 {
-			sb.WriteString(fmt.Sprintf("Altitude: %.1f m\n", alt))
+			fmt.Fprintf(&sb, "Altitude: %.1f m\n", alt)
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("Sent: %s\n", ts.Format("2006-01-02 15:04:05")))
-	sb.WriteString(fmt.Sprintf("Message ID: %s\n", msg.MessageID))
+	fmt.Fprintf(&sb, "Sent: %s\n", ts.Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(&sb, "Message ID: %s\n", msg.MessageID)
 
 	// Attachment info
 	if msg.MediaType != nil {
